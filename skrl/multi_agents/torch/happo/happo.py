@@ -4,6 +4,7 @@ import copy
 import itertools
 import gymnasium
 from packaging import version
+import random
 
 import torch
 import torch.nn as nn
@@ -447,7 +448,31 @@ class HAPPO(MultiAgent):
 
             return returns, advantages
 
-        for uid in self.possible_agents:
+        # HAPPO: random permutation of agents
+        agent_ids = list(self.possible_agents)
+        random.shuffle(agent_ids)
+        
+        # TODO: HAPPO: set the factor and compute old_actions_logprob
+        factor = torch.ones(
+            self.memories[agent_ids[0]].get_tensor_by_name("states").shape[:2] + (1,),
+            device=self.device,
+            dtype=torch.float32,
+        )
+        
+        # (2) Compute old_action_logprob for each agent before training
+        old_log_probs_all_agents = {}
+        for uid in agent_ids:
+            memory = self.memories[uid]
+            states = self._state_preprocessor[uid](memory.get_tensor_by_name("states")[:-1].reshape(-1, *memory.get_tensor_by_name("states").shape[2:]))
+            actions = memory.get_tensor_by_name("actions").reshape(-1, *memory.get_tensor_by_name("actions").shape[2:])
+            with torch.no_grad():
+                _, old_log_prob, _ = self.policies[uid].act(
+                    {"states": states, "taken_actions": actions},
+                    role="policy"
+                )
+            old_log_probs_all_agents[uid] = old_log_prob.reshape(factor.shape)
+
+        for uid in agent_ids:
             policy = self.policies[uid]
             value = self.values[uid]
             memory = self.memories[uid]
@@ -532,7 +557,9 @@ class HAPPO(MultiAgent):
                             ratio, 1.0 - self._ratio_clip[uid], 1.0 + self._ratio_clip[uid]
                         )
 
-                        policy_loss = -torch.min(surrogate, surrogate_clipped).mean()
+                        # policy_loss = -torch.min(surrogate, surrogate_clipped).mean()
+                        policy_loss = -torch.mean(factor.view(-1, 1) * torch.min(surrogate, surrogate_clipped))
+                        # policy_loss = -torch.min(surrogate, surrogate_clipped).mean() * factor
 
                         # compute value loss
                         predicted_values, _, _ = value.act({"states": sampled_shared_states}, role="value")
@@ -582,6 +609,23 @@ class HAPPO(MultiAgent):
                     else:
                         self.schedulers[uid].step()
 
+            # (4) Compute new log_prob for updated policy
+            states = self._state_preprocessor[uid](memory.get_tensor_by_name("states")[:-1].reshape(-1, *memory.get_tensor_by_name("states").shape[2:]))
+            actions = memory.get_tensor_by_name("actions").reshape(-1, *memory.get_tensor_by_name("actions").shape[2:])
+            with torch.no_grad():
+                _, new_log_prob, _ = policy.act(
+                    {"states": states, "taken_actions": actions},
+                    role="policy"
+                )
+            new_log_prob = new_log_prob.reshape(factor.shape)
+
+            # (5) Update factor for remaining agents
+            ratio = torch.exp(new_log_prob - old_log_probs_all_agents[uid])
+            imp_weight = torch.prod(ratio, dim=-1, keepdim=True)
+            for other_uid in self.possible_agents:
+                if other_uid != uid:
+                    factor *= imp_weight
+            
             # record data
             self.track_data(
                 f"Loss / Policy loss ({uid})",
