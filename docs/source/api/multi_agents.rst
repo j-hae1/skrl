@@ -6,6 +6,7 @@ Multi-agents
 
     IPPO <multi_agents/ippo>
     MAPPO <multi_agents/mappo>
+    HAPPO <multi_agents/happo>
 
 Multi-agents are autonomous entities that interact with the environment to learn and improve their behavior. Multi-agents' goal is to learn optimal policies, which are correspondence between states and actions that maximize the cumulative reward received from the environment over time.
 
@@ -25,7 +26,9 @@ Multi-agents are autonomous entities that interact with the environment to learn
     * - :doc:`Multi-Agent Proximal Policy Optimization <multi_agents/mappo>` (**MAPPO**)
       - .. centered:: :math:`\blacksquare`
       - .. centered:: :math:`\blacksquare`
-
+    * - :doc:`Heterogeneous-Agent Proximal Policy Optimization <multi_agents/mappo>` (**HAPPO**)
+      - .. centered:: :math:`\blacksquare`
+      - .. centered:: :math:`\blacksquare`
 Base class
 ----------
 

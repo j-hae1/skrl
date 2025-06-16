@@ -142,6 +142,10 @@ class Runner:
             from skrl.multi_agents.torch.mappo import MAPPO, MAPPO_DEFAULT_CONFIG
 
             component = MAPPO_DEFAULT_CONFIG if "default_config" in name else MAPPO
+        elif name in ["happo", "happo_default_config"]:
+            from skrl.multi_agents.torch.happo import HAPPO, HAPPO_DEFAULT_CONFIG
+
+            component = HAPPO_DEFAULT_CONFIG if "default_config" in name else HAPPO
         # trainer
         elif name == "sequentialtrainer":
             from skrl.trainers.torch import SequentialTrainer as component
@@ -234,7 +238,7 @@ class Runner:
                     model_class = self._component(model_class)
                     # get specific spaces according to agent/model cfg
                     observation_space = observation_spaces[agent_id]
-                    if agent_class == "mappo" and role == "value":
+                    if (agent_class == "mappo" or agent_class == "happo") and role == "value":
                         observation_space = state_spaces[agent_id]
                     if agent_class == "amp" and role == "discriminator":
                         try:
@@ -447,6 +451,24 @@ class Runner:
                 "possible_agents": possible_agents,
             }
         elif agent_class in ["mappo"]:
+            agent_cfg = self._component(f"{agent_class}_DEFAULT_CONFIG").copy()
+            agent_cfg.update(self._process_cfg(cfg["agent"]))
+            agent_cfg["state_preprocessor_kwargs"].update(
+                {agent_id: {"size": observation_spaces[agent_id], "device": device} for agent_id in possible_agents}
+            )
+            agent_cfg["shared_state_preprocessor_kwargs"].update(
+                {agent_id: {"size": state_spaces[agent_id], "device": device} for agent_id in possible_agents}
+            )
+            agent_cfg["value_preprocessor_kwargs"].update({"size": 1, "device": device})
+            agent_kwargs = {
+                "models": models,
+                "memories": memories,
+                "observation_spaces": observation_spaces,
+                "action_spaces": action_spaces,
+                "shared_observation_spaces": state_spaces,
+                "possible_agents": possible_agents,
+            }
+        elif agent_class in ["happo"]:
             agent_cfg = self._component(f"{agent_class}_DEFAULT_CONFIG").copy()
             agent_cfg.update(self._process_cfg(cfg["agent"]))
             agent_cfg["state_preprocessor_kwargs"].update(

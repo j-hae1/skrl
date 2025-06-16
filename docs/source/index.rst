@@ -131,6 +131,7 @@ Multi-agents
 
     * :doc:`Independent Proximal Policy Optimization <api/multi_agents/ippo>` (**IPPO**)
     * :doc:`Multi-Agent Proximal Policy Optimization <api/multi_agents/mappo>` (**MAPPO**)
+    * :doc:`Heterogeneous-Agent Proximal Policy Optimization <api/multi_agents/happo>` (**HAPPO**)
 
 Environments
 ^^^^^^^^^^^^
