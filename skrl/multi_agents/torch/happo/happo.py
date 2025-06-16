@@ -246,6 +246,7 @@ class HAPPO(MultiAgent):
                 self.memories[uid].create_tensor(name="values", size=1, dtype=torch.float32)
                 self.memories[uid].create_tensor(name="returns", size=1, dtype=torch.float32)
                 self.memories[uid].create_tensor(name="advantages", size=1, dtype=torch.float32)
+                self.memories[uid].create_tensor(name="factor", size=1, dtype=torch.float32)
 
                 # tensors sampled during training
                 self._tensors_names = [
@@ -256,6 +257,7 @@ class HAPPO(MultiAgent):
                     "values",
                     "returns",
                     "advantages",
+                    "factor",
                 ]
 
         # create temporary variables needed for storage and computation
@@ -463,7 +465,7 @@ class HAPPO(MultiAgent):
         old_log_probs_all_agents = {}
         for uid in agent_ids:
             memory = self.memories[uid]
-            states = self._state_preprocessor[uid](memory.get_tensor_by_name("states")[:-1].reshape(-1, *memory.get_tensor_by_name("states").shape[2:]))
+            states = self._state_preprocessor[uid](memory.get_tensor_by_name("states").reshape(-1, *memory.get_tensor_by_name("states").shape[2:]))
             actions = memory.get_tensor_by_name("actions").reshape(-1, *memory.get_tensor_by_name("actions").shape[2:])
             with torch.no_grad():
                 _, old_log_prob, _ = self.policies[uid].act(
@@ -500,6 +502,7 @@ class HAPPO(MultiAgent):
             memory.set_tensor_by_name("values", self._value_preprocessor[uid](values, train=True))
             memory.set_tensor_by_name("returns", self._value_preprocessor[uid](returns, train=True))
             memory.set_tensor_by_name("advantages", advantages)
+            memory.set_tensor_by_name("factor", factor)
 
             # sample mini-batches from memory
             sampled_batches = memory.sample_all(names=self._tensors_names, mini_batches=self._mini_batches[uid])
@@ -521,6 +524,7 @@ class HAPPO(MultiAgent):
                     sampled_values,
                     sampled_returns,
                     sampled_advantages,
+                    sampled_factor,
                 ) in sampled_batches:
 
                     with torch.autocast(device_type=self._device_type, enabled=self._mixed_precision):
@@ -558,7 +562,7 @@ class HAPPO(MultiAgent):
                         )
 
                         # policy_loss = -torch.min(surrogate, surrogate_clipped).mean()
-                        policy_loss = -torch.mean(factor.view(-1, 1) * torch.min(surrogate, surrogate_clipped))
+                        policy_loss = -(sampled_factor * torch.min(surrogate, surrogate_clipped)).mean()
                         # policy_loss = -torch.min(surrogate, surrogate_clipped).mean() * factor
 
                         # compute value loss
@@ -610,7 +614,7 @@ class HAPPO(MultiAgent):
                         self.schedulers[uid].step()
 
             # (4) Compute new log_prob for updated policy
-            states = self._state_preprocessor[uid](memory.get_tensor_by_name("states")[:-1].reshape(-1, *memory.get_tensor_by_name("states").shape[2:]))
+            states = self._state_preprocessor[uid](memory.get_tensor_by_name("states").reshape(-1, *memory.get_tensor_by_name("states").shape[2:]))
             actions = memory.get_tensor_by_name("actions").reshape(-1, *memory.get_tensor_by_name("actions").shape[2:])
             with torch.no_grad():
                 _, new_log_prob, _ = policy.act(
@@ -622,6 +626,7 @@ class HAPPO(MultiAgent):
             # (5) Update factor for remaining agents
             ratio = torch.exp(new_log_prob - old_log_probs_all_agents[uid])
             imp_weight = torch.prod(ratio, dim=-1, keepdim=True)
+
             for other_uid in self.possible_agents:
                 if other_uid != uid:
                     factor *= imp_weight
