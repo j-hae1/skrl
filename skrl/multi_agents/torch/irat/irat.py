@@ -42,6 +42,7 @@ IRAT_DEFAULT_CONFIG = {
 
     "grad_norm_clip": 0.5,              # clipping coefficient for the norm of the gradients
     "ratio_clip": 0.2,                  # clipping coefficient for computing the clipped surrogate objective
+    "idv_ratio_clip": 3.0,                  # clipping coefficient for computing the clipped surrogate objective
     "value_clip": 0.2,                  # clipping coefficient for computing the value loss (if clip_predicted_values is True)
     "clip_predicted_values": False,     # clip predicted values during value loss computation
 
@@ -130,8 +131,8 @@ class IRAT(MultiAgentIrat):
 
         for uid in self.possible_agents:
             # checkpoint models
-            self.checkpoint_modules[uid]["policy"] = self.idv_policies[uid]
-            self.checkpoint_modules[uid]["value"] = self.idv_values[uid]
+            self.checkpoint_modules[uid]["idv_policy"] = self.idv_policies[uid]
+            self.checkpoint_modules[uid]["idv_value"] = self.idv_values[uid]
 
             # broadcast models' parameters in distributed runs
             if config.torch.is_distributed:
@@ -181,6 +182,16 @@ class IRAT(MultiAgentIrat):
         
         # IRAT act
         self._act_policy = self.cfg["act_policy"]  # idv or team
+        
+        # IRAT LOSS
+        self._idv_use_cross_entropy = self.cfg.get("idv_use_cross_entropy", False)
+        self._team_use_cross_entropy = self.cfg.get("team_use_cross_entropy", False)
+        self._idv_clip_use_present = self.cfg.get("idv_clip_use_present", False)
+        self._idv_use_two_clip = self.cfg.get("idv_use_two_clip", True)
+        self._idv_use_kl_loss = self.cfg.get("idv_use_kl_loss", True)
+        
+        self._idv_ratio_clip = self._as_dict(self.cfg["idv_ratio_clip"])
+        self._idv_kl_coef = self._as_dict(self.cfg.get("idv_kl_coef", 2.0))  # KL loss coefficient for individual policies
 
         # set up automatic mixed precision
         self._device_type = torch.device(device).type
@@ -228,7 +239,7 @@ class IRAT(MultiAgentIrat):
                         optimizer, **self._learning_rate_scheduler_kwargs[uid]
                     )
 
-            self.checkpoint_modules[uid]["optimizer"] = self.idv_optimizers[uid]
+            self.checkpoint_modules[uid]["idv_optimizer"] = self.idv_optimizers[uid]
 
             # set up preprocessors
             if self._state_preprocessor[uid] is not None:
@@ -641,44 +652,93 @@ class IRAT(MultiAgentIrat):
                 ) in sampled_batches:
 
                     with torch.autocast(device_type=self._device_type, enabled=self._mixed_precision):
-
+                        # set the old distribution parameters
+                        idv_sampled_old_dists = torch.distributions.Normal(
+                                loc=idv_sampled_dists_loc.clone().detach(),
+                                scale=idv_sampled_dists_scale.clone().detach(),
+                            )
+                        
+                        team_sampled_old_dists = torch.distributions.Normal(
+                                loc=team_sampled_dists_loc.clone().detach(),
+                                scale=team_sampled_dists_scale.clone().detach(),
+                            )
+                        
+                        # preprocess states
                         sampled_states = self._state_preprocessor[uid](sampled_states, train=not epoch)
                         sampled_shared_states = self._shared_state_preprocessor[uid](
                             sampled_shared_states, train=not epoch
                         )
+                        
+                        # clamp old logprobs for stability
+                        idv_sampled_log_prob = torch.clamp(idv_sampled_log_prob, min=-20, max=2)
+                        team_sampled_log_prob = torch.clamp(team_sampled_log_prob, min=-20, max=2)
+                        
+                        # evaluate current policies                        
 
-                        _, idv_next_log_prob, _ = idv_policy.act(
+                        _, idv_next_log_prob, idv_next_outputs = idv_policy.act(
+                            {"states": sampled_states, "taken_actions": sampled_actions}, role="policy"
+                        )
+                        idv_next_dists = idv_next_outputs["distribution"]
+                        idv_next_entropy = idv_policy.get_entropy(role="policy")
+                        
+                        _, team_next_log_prob, team_next_outputs = team_policy.act(
                             {"states": sampled_states, "taken_actions": sampled_actions}, role="policy"
                         )
                         
-                        _, team_next_log_prob, _ = team_policy.act(
-                            {"states": sampled_states, "taken_actions": sampled_actions}, role="policy"
-                        )
+                        team_next_dists = team_next_outputs["distribution"]
+                        team_next_entropy = team_policy.get_entropy(role="policy")
+                        
+                        idv_predicted_values, _, _ = idv_value.act({"states": sampled_shared_states}, role="value")
+                        team_predicted_values, _, _ = team_value.act({"states": sampled_shared_states}, role="value")
 
-                        # compute approximate KL divergence
-                        with torch.no_grad():
-                            idv_ratio = idv_next_log_prob - idv_sampled_log_prob
-                            idv_kl_divergence = ((torch.exp(idv_ratio) - 1) - idv_ratio).mean()
-                            idv_kl_divergences.append(idv_kl_divergence)
+                        # --- KL & Cross-Entropy Loss ---
+                        idv_kl_loss = torch.tensor(0.0, device=self.device)
+                        team_kl_loss = torch.tensor(0.0, device=self.device)
+                        idv_cross_entropy = torch.tensor(0.0, device=self.device)
+                        team_cross_entropy = torch.tensor(0.0, device=self.device)
+                        
+                        # compute KL divergence and cross-entropy loss between old team and new individual policies
+                        idv_kl_loss += torch.distributions.kl_divergence(team_sampled_old_dists, idv_next_dists).mean()
+                        if self._idv_use_cross_entropy:
+                            sample_from_team = team_sampled_old_dists.rsample()
+                            idv_cross_entropy -= idv_next_dists.log_prob(sample_from_team).sum(dim=-1).mean()
 
-                        # early stopping with KL divergence
-                        if self._kl_threshold[uid] and idv_kl_divergence > self._kl_threshold[uid]:
-                            break
+                        # compute KL divergence and cross-entropy loss between old individual and new team policies
+                        team_kl_loss += torch.distributions.kl_divergence(idv_sampled_old_dists, team_next_dists).mean()
+                        if self._team_use_cross_entropy:
+                            sample_from_idv = idv_sampled_old_dists.rsample()
+                            team_cross_entropy -= team_next_dists.log_prob(sample_from_idv).sum(dim=-1).mean()
 
-                        # compute entropy loss
-                        if self._entropy_loss_scale[uid]:
-                            idv_entropy_loss = -self._entropy_loss_scale[uid] * idv_policy.get_entropy(role="policy").mean()
+                        idv_imp_weights = torch.exp(idv_next_log_prob - idv_sampled_log_prob)
+                        team_imp_weights = torch.exp(team_next_log_prob - team_sampled_log_prob)
+
+                        if self._idv_clip_use_present:
+                            so_weights = torch.exp(idv_next_log_prob - team_next_log_prob.clone().detach())
                         else:
-                            idv_entropy_loss = 0
+                            so_weights = torch.exp(idv_next_log_prob - team_sampled_log_prob.clone().detach())
 
-                        # compute policy loss
-                        idv_ratio = torch.exp(idv_next_log_prob - idv_sampled_log_prob)
-                        idv_surrogate = idv_sampled_advantages * idv_ratio
-                        idv_surrogate_clipped = idv_sampled_advantages * torch.clip(
-                            idv_ratio, 1.0 - self._ratio_clip[uid], 1.0 + self._ratio_clip[uid]
-                        )
-
-                        idv_policy_loss = -torch.min(idv_surrogate, idv_surrogate_clipped).mean()
+                        idv_surr1 = idv_sampled_advantages * idv_imp_weights
+                        idv_surr2 = torch.clamp(
+                            idv_imp_weights, 1.0 - self._ratio_clip[uid], 1.0 + self._ratio_clip[uid]
+                        ) * idv_sampled_advantages
+                        idv_clp = torch.clamp(so_weights, 1.0 - self._idv_ratio_clip[uid],
+                                              1.0 + self._idv_ratio_clip[uid]) 
+                        idv_surr3 = idv_sampled_advantages * idv_clp
+                        
+                        idv_min = torch.min(idv_surr1, idv_surr2)
+                        if self._idv_use_two_clip:
+                            idv_min = torch.min(idv_min, idv_surr3)
+                            
+                        policy_action_loss = (-1) * idv_min.mean()
+                        idv_policy_loss = policy_action_loss
+                        idv_loss = idv_policy_loss - idv_next_entropy * self._entropy_loss_scale[uid]
+                        
+                        if self._idv_use_kl_loss:
+                            idv_loss += self._idv_kl_coef[uid] * idv_kl_loss
+                        elif self._idv_use_cross_entropy:
+                            idv_loss += self._idv_kl_coef[uid] * idv_cross_entropy
+                        else:
+                            idv_kl_loss = torch.tensor(0.0, device=self.device)
 
                         # compute value loss
                         idv_predicted_values, _, _ = idv_value.act({"states": sampled_shared_states}, role="value")
@@ -689,9 +749,23 @@ class IRAT(MultiAgentIrat):
                             )
                         idv_value_loss = self._value_loss_scale[uid] * F.mse_loss(idv_sampled_returns, idv_predicted_values)
 
+                    # update individual actor
+                    if torch.isnan(idv_loss).any():
+                        print("idv loss has nan")
+                    if torch.isinf(idv_loss).any():
+                        print("idv loss has inf")
+                    if torch.isnan(so_weights).any():
+                        print("so_weights has nan")
+                    if torch.isinf(so_weights).any():
+                        print("so_weights has inf")
+                    if torch.isnan(idv_imp_weights).any():
+                        print("idv imp_weights has nan")
+                    if torch.isinf(idv_imp_weights).any():
+                        print("idv imp_weights has inf")
+
                     # optimization step
                     self.idv_optimizers[uid].zero_grad()
-                    self.scaler.scale(idv_policy_loss + idv_entropy_loss + idv_value_loss).backward()
+                    self.scaler.scale(idv_loss + idv_value_loss).backward()
 
                     if config.torch.is_distributed:
                         idv_policy.reduce_parameters()
@@ -714,7 +788,12 @@ class IRAT(MultiAgentIrat):
                     idv_cumulative_policy_loss += idv_policy_loss.item()
                     idv_cumulative_value_loss += idv_value_loss.item()
                     if self._entropy_loss_scale[uid]:
-                        idv_cumulative_entropy_loss += idv_entropy_loss.item()
+                        if self._idv_use_kl_loss:
+                            idv_cumulative_entropy_loss += idv_kl_loss.item()
+                        elif self._idv_use_cross_entropy:
+                            idv_cumulative_entropy_loss += idv_cross_entropy.item()
+                        else:
+                            idv_cumulative_entropy_loss += 0.0
 
                 # update learning rate
                 if self._learning_rate_scheduler[uid]:

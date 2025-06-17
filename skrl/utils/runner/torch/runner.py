@@ -242,7 +242,7 @@ class Runner:
                     model_class = self._component(model_class)
                     # get specific spaces according to agent/model cfg
                     observation_space = observation_spaces[agent_id]
-                    if (agent_class == "mappo" or agent_class == "happo") and role == "value":
+                    if (agent_class == "mappo" or agent_class == "happo" or agent_class == "irat") and role == "value":
                         observation_space = state_spaces[agent_id]
                     if agent_class == "amp" and role == "discriminator":
                         try:
