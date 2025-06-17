@@ -754,7 +754,14 @@ class IRAT(MultiAgentIrat):
                         
                         idv_min = torch.min(idv_surr1, idv_surr2)
                         if self._idv_use_two_clip:
-                            idv_min = torch.min(idv_min, idv_surr3)
+                            gt_one = so_weights > 1.0
+                            le_one = so_weights <= 1.0
+                            # idv_min = torch.min(idv_min, idv_surr3) it is original code, but i think it is wrong.
+                            idv_min = torch.where(
+                                gt_one, 
+                                torch.min(idv_min, idv_surr3),  # if so_weights > 1 → min
+                                torch.max(idv_min, idv_surr3)   # else (≤1) → max
+                            )
                             
                         policy_action_loss = (-1) * idv_min.mean()
                         idv_policy_loss = policy_action_loss
