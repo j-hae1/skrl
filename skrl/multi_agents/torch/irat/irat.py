@@ -679,14 +679,14 @@ class IRAT(MultiAgentIrat):
                             {"states": sampled_states, "taken_actions": sampled_actions}, role="policy"
                         )
                         idv_next_dists = idv_next_outputs["distribution"]
-                        idv_next_entropy = idv_policy.get_entropy(role="policy")
+                        idv_next_entropy = idv_policy.get_entropy(role="policy").mean()
                         
                         _, team_next_log_prob, team_next_outputs = team_policy.act(
                             {"states": sampled_states, "taken_actions": sampled_actions}, role="policy"
                         )
                         
                         team_next_dists = team_next_outputs["distribution"]
-                        team_next_entropy = team_policy.get_entropy(role="policy")
+                        team_next_entropy = team_policy.get_entropy(role="policy").mean()
                         
                         idv_predicted_values, _, _ = idv_value.act({"states": sampled_shared_states}, role="value")
                         team_predicted_values, _, _ = team_value.act({"states": sampled_shared_states}, role="value")
