@@ -153,6 +153,7 @@ class GaussianMixin:
             log_prob = log_prob.unsqueeze(-1)
 
         outputs["mean_actions"] = mean_actions
+        outputs["distribution"] = self._g_distribution
         return actions, log_prob, outputs
 
     def get_entropy(self, role: str = "") -> torch.Tensor:

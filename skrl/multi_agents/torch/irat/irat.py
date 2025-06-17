@@ -271,12 +271,16 @@ class IRAT(MultiAgentIrat):
                 self.memories[uid].create_tensor(name="idv_values", size=1, dtype=torch.float32)
                 self.memories[uid].create_tensor(name="idv_returns", size=1, dtype=torch.float32)
                 self.memories[uid].create_tensor(name="idv_advantages", size=1, dtype=torch.float32)
+                self.memories[uid].create_tensor(name="idv_dists_loc", size=self.action_spaces[uid], dtype=torch.float32)
+                self.memories[uid].create_tensor(name="idv_dists_scale", size=self.action_spaces[uid], dtype=torch.float32)
                 
                 self.memories[uid].create_tensor(name="team_rewards", size=1, dtype=torch.float32)
                 self.memories[uid].create_tensor(name="team_log_prob", size=1, dtype=torch.float32)
                 self.memories[uid].create_tensor(name="team_values", size=1, dtype=torch.float32)
                 self.memories[uid].create_tensor(name="team_returns", size=1, dtype=torch.float32)
                 self.memories[uid].create_tensor(name="team_advantages", size=1, dtype=torch.float32)
+                self.memories[uid].create_tensor(name="team_dists_loc", size=self.action_spaces[uid], dtype=torch.float32)
+                self.memories[uid].create_tensor(name="team_dists_scale", size=self.action_spaces[uid], dtype=torch.float32)
 
                 # tensors sampled during training
                 self._tensors_names = [
@@ -287,15 +291,23 @@ class IRAT(MultiAgentIrat):
                     "idv_values",
                     "idv_returns",
                     "idv_advantages",
+                    "idv_dists_loc",
+                    "idv_dists_scale",
                     "team_log_prob",
                     "team_values",
                     "team_returns",
                     "team_advantages",
+                    "team_dists_loc",
+                    "team_dists_scale",
                 ]
 
         # create temporary variables needed for storage and computation
         self._current_team_log_prob = []
         self._current_idv_log_prob = []
+        self._current_team_dists_loc = []
+        self._current_team_dists_scale = []
+        self._current_idv_dists_loc = []
+        self._current_idv_dists_scale = []
         self._current_shared_next_states = []
 
     def act(self, states: Mapping[str, torch.Tensor], timestep: int, timesteps: int) -> torch.Tensor:
@@ -318,17 +330,27 @@ class IRAT(MultiAgentIrat):
 
         # sample stochastic actions
         with torch.autocast(device_type=self._device_type, enabled=self._mixed_precision):
+            idv_data = [
+                self.idv_policies[uid].act({"states": self._state_preprocessor[uid](states[uid])}, role="policy")
+                for uid in self.possible_agents
+            ]
+            
+            idv_actions = {uid: d[0] for uid, d in zip(self.possible_agents, idv_data)}
+            idv_log_prob = {uid: d[1] for uid, d in zip(self.possible_agents, idv_data)}
+            idv_outputs = {uid: d[2] for uid, d in zip(self.possible_agents, idv_data)}
+            idv_dists = {uid: out["distribution"] for uid, out in idv_outputs.items()}
+
+            team_data = [
+                self.team_policies[uid].act({"states": self._state_preprocessor[uid](states[uid])}, role="policy")
+                for uid in self.possible_agents
+            ]
+            team_actions = {uid: d[0] for uid, d in zip(self.possible_agents, team_data)}
+            team_log_prob = {uid: d[1] for uid, d in zip(self.possible_agents, team_data)}
+            team_outputs = {uid: d[2] for uid, d in zip(self.possible_agents, team_data)}
+            team_dists = {uid: out["distribution"] for uid, out in team_outputs.items()}
+
             if self._act_policy == "idv":
-                idv_data = [
-                    self.idv_policies[uid].act({"states": self._state_preprocessor[uid](states[uid])}, role="policy")
-                    for uid in self.possible_agents
-                ]
-                
-                actions = {uid: d[0] for uid, d in zip(self.possible_agents, idv_data)}
-                idv_log_prob = {uid: d[1] for uid, d in zip(self.possible_agents, idv_data)}
-                idv_outputs = {uid: d[2] for uid, d in zip(self.possible_agents, idv_data)}
-                
-                # 추가: team_policy 기준 log_prob 계산
+                actions = idv_actions
                 team_log_prob = {}
                 for uid in self.possible_agents:
                     state = self._state_preprocessor[uid](states[uid])
@@ -336,17 +358,10 @@ class IRAT(MultiAgentIrat):
                         {"states": state, "taken_actions": actions[uid]}, role="policy"
                     )
                     team_log_prob[uid] = logp
-
-            elif self._act_policy == "team":
-                team_data = [
-                    self.team_policies[uid].act({"states": self._state_preprocessor[uid](states[uid])}, role="policy")
-                    for uid in self.possible_agents
-                ]
-                actions = {uid: d[0] for uid, d in zip(self.possible_agents, team_data)}
-                team_log_prob = {uid: d[1] for uid, d in zip(self.possible_agents, team_data)}
-                team_outputs = {uid: d[2] for uid, d in zip(self.possible_agents, team_data)}
                 
+            elif self._act_policy == "team":
                 # 추가: idv_policy 기준 log_prob 계산
+                actions = team_actions
                 idv_log_prob = {}
                 for uid in self.possible_agents:
                     state = self._state_preprocessor[uid](states[uid])
@@ -359,7 +374,11 @@ class IRAT(MultiAgentIrat):
                 raise ValueError(f"Unknown act_policy: {self._act_policy}. Use 'idv' or 'team'.")
 
             self._current_idv_log_prob = idv_log_prob
+            self._current_idv_dists_loc = {uid: dist.loc for uid, dist in idv_dists.items()}
+            self._current_idv_dists_scale = {uid: dist.scale for uid, dist in idv_dists.items()}
             self._current_team_log_prob = team_log_prob
+            self._current_team_dists_loc = {uid: dist.loc for uid, dist in team_dists.items()}
+            self._current_team_dists_scale = {uid: dist.scale for uid, dist in team_dists.items()}
 
         if self._act_policy == "idv":
             log_prob, outputs = idv_log_prob, idv_outputs
@@ -444,6 +463,10 @@ class IRAT(MultiAgentIrat):
                     truncated=truncated[uid],
                     idv_log_prob=self._current_idv_log_prob[uid],
                     team_log_prob=self._current_team_log_prob[uid],
+                    idv_dists_loc=self._current_idv_dists_loc[uid],
+                    idv_dists_scale=self._current_idv_dists_scale[uid],
+                    team_dists_loc=self._current_team_dists_loc[uid],                    
+                    team_dists_scale=self._current_team_dists_scale[uid],                    
                     idv_values=idv_values,
                     team_values=team_values,
                     shared_states=shared_states,
@@ -588,7 +611,7 @@ class IRAT(MultiAgentIrat):
             memory.set_tensor_by_name("team_advantages", team_advantages)
 
             # sample mini-batches from memory
-            idv_sampled_batches = memory.sample_all(names=self._tensors_names, mini_batches=self._mini_batches[uid])
+            sampled_batches = memory.sample_all(names=self._tensors_names, mini_batches=self._mini_batches[uid])
 
             idv_cumulative_policy_loss = 0
             idv_cumulative_entropy_loss = 0
@@ -607,11 +630,15 @@ class IRAT(MultiAgentIrat):
                     idv_sampled_values,
                     idv_sampled_returns,
                     idv_sampled_advantages,
+                    idv_sampled_dists_loc,
+                    idv_sampled_dists_scale,
                     team_sampled_log_prob,
                     team_sampled_values,
                     team_sampled_returns,
                     team_sampled_advantages,                    
-                ) in idv_sampled_batches:
+                    team_sampled_dists_loc,                    
+                    team_sampled_dists_scale,                    
+                ) in sampled_batches:
 
                     with torch.autocast(device_type=self._device_type, enabled=self._mixed_precision):
 
