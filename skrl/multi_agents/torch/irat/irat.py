@@ -12,7 +12,7 @@ import torch.nn.functional as F
 from skrl import config, logger
 from skrl.memories.torch import Memory
 from skrl.models.torch import Model
-from skrl.multi_agents.torch import MultiAgent
+from skrl.multi_agents.torch import MultiAgent, MultiAgentIrat
 from skrl.resources.schedulers.torch import KLAdaptiveLR
 
 
@@ -71,7 +71,7 @@ IRAT_DEFAULT_CONFIG = {
 # fmt: on
 
 
-class IRAT(MultiAgent):
+class IRAT(MultiAgentIrat):
     def __init__(
         self,
         possible_agents: Sequence[str],
@@ -120,22 +120,26 @@ class IRAT(MultiAgent):
 
         self.shared_observation_spaces = shared_observation_spaces
 
-        # models
-        self.policies = {uid: self.models[uid].get("policy", None) for uid in self.possible_agents}
-        self.values = {uid: self.models[uid].get("value", None) for uid in self.possible_agents}
+        # Individual models
+        self.idv_policies = {uid: self.idv_models[uid].get("policy", None) for uid in self.possible_agents}
+        self.idv_values = {uid: self.idv_models[uid].get("value", None) for uid in self.possible_agents}
+        
+        # team models
+        self.team_policies = {uid: self.team_models[uid].get("policy", None) for uid in self.possible_agents}
+        self.team_values = {uid: self.team_models[uid].get("value", None) for uid in self.possible_agents}
 
         for uid in self.possible_agents:
             # checkpoint models
-            self.checkpoint_modules[uid]["policy"] = self.policies[uid]
-            self.checkpoint_modules[uid]["value"] = self.values[uid]
+            self.checkpoint_modules[uid]["policy"] = self.idv_policies[uid]
+            self.checkpoint_modules[uid]["value"] = self.idv_values[uid]
 
             # broadcast models' parameters in distributed runs
             if config.torch.is_distributed:
                 logger.info(f"Broadcasting models' parameters")
-                if self.policies[uid] is not None:
-                    self.policies[uid].broadcast_parameters()
-                    if self.values[uid] is not None and self.policies[uid] is not self.values[uid]:
-                        self.values[uid].broadcast_parameters()
+                if self.idv_policies[uid] is not None:
+                    self.idv_policies[uid].broadcast_parameters()
+                    if self.idv_values[uid] is not None and self.idv_policies[uid] is not self.idv_values[uid]:
+                        self.idv_values[uid].broadcast_parameters()
 
         # configuration
         self._learning_epochs = self._as_dict(self.cfg["learning_epochs"])
@@ -187,14 +191,14 @@ class IRAT(MultiAgent):
         self.schedulers = {}
 
         for uid in self.possible_agents:
-            policy = self.policies[uid]
-            value = self.values[uid]
-            if policy is not None and value is not None:
-                if policy is value:
-                    optimizer = torch.optim.Adam(policy.parameters(), lr=self._learning_rate[uid])
+            idv_policy = self.idv_policies[uid]
+            idv_value = self.idv_values[uid]
+            if idv_policy is not None and idv_value is not None:
+                if idv_policy is idv_value:
+                    optimizer = torch.optim.Adam(idv_policy.parameters(), lr=self._learning_rate[uid])
                 else:
                     optimizer = torch.optim.Adam(
-                        itertools.chain(policy.parameters(), value.parameters()), lr=self._learning_rate[uid]
+                        itertools.chain(idv_policy.parameters(), idv_value.parameters()), lr=self._learning_rate[uid]
                     )
                 self.optimizers[uid] = optimizer
                 if self._learning_rate_scheduler[uid] is not None:
@@ -231,20 +235,20 @@ class IRAT(MultiAgent):
         self.set_mode("eval")
 
         # create tensors in memories
-        if self.memories:
+        if self.idv_memories:
             for uid in self.possible_agents:
-                self.memories[uid].create_tensor(name="states", size=self.observation_spaces[uid], dtype=torch.float32)
-                self.memories[uid].create_tensor(
+                self.idv_memories[uid].create_tensor(name="states", size=self.observation_spaces[uid], dtype=torch.float32)
+                self.idv_memories[uid].create_tensor(
                     name="shared_states", size=self.shared_observation_spaces[uid], dtype=torch.float32
                 )
-                self.memories[uid].create_tensor(name="actions", size=self.action_spaces[uid], dtype=torch.float32)
-                self.memories[uid].create_tensor(name="rewards", size=1, dtype=torch.float32)
-                self.memories[uid].create_tensor(name="terminated", size=1, dtype=torch.bool)
-                self.memories[uid].create_tensor(name="truncated", size=1, dtype=torch.bool)
-                self.memories[uid].create_tensor(name="log_prob", size=1, dtype=torch.float32)
-                self.memories[uid].create_tensor(name="values", size=1, dtype=torch.float32)
-                self.memories[uid].create_tensor(name="returns", size=1, dtype=torch.float32)
-                self.memories[uid].create_tensor(name="advantages", size=1, dtype=torch.float32)
+                self.idv_memories[uid].create_tensor(name="actions", size=self.action_spaces[uid], dtype=torch.float32)
+                self.idv_memories[uid].create_tensor(name="rewards", size=1, dtype=torch.float32)
+                self.idv_memories[uid].create_tensor(name="terminated", size=1, dtype=torch.bool)
+                self.idv_memories[uid].create_tensor(name="truncated", size=1, dtype=torch.bool)
+                self.idv_memories[uid].create_tensor(name="log_prob", size=1, dtype=torch.float32)
+                self.idv_memories[uid].create_tensor(name="values", size=1, dtype=torch.float32)
+                self.idv_memories[uid].create_tensor(name="returns", size=1, dtype=torch.float32)
+                self.idv_memories[uid].create_tensor(name="advantages", size=1, dtype=torch.float32)
 
                 # tensors sampled during training
                 self._tensors_names = [
@@ -256,6 +260,21 @@ class IRAT(MultiAgent):
                     "returns",
                     "advantages",
                 ]
+                
+        if self.team_memories:
+            for uid in self.possible_agents:
+                self.team_memories[uid].create_tensor(name="states", size=self.observation_spaces[uid], dtype=torch.float32)
+                self.team_memories[uid].create_tensor(
+                    name="shared_states", size=self.shared_observation_spaces[uid], dtype=torch.float32
+                )
+                self.team_memories[uid].create_tensor(name="actions", size=self.action_spaces[uid], dtype=torch.float32)
+                self.team_memories[uid].create_tensor(name="rewards", size=1, dtype=torch.float32)
+                self.team_memories[uid].create_tensor(name="terminated", size=1, dtype=torch.bool)
+                self.team_memories[uid].create_tensor(name="truncated", size=1, dtype=torch.bool)
+                self.team_memories[uid].create_tensor(name="log_prob", size=1, dtype=torch.float32)
+                self.team_memories[uid].create_tensor(name="values", size=1, dtype=torch.float32)
+                self.team_memories[uid].create_tensor(name="returns", size=1, dtype=torch.float32)
+                self.team_memories[uid].create_tensor(name="advantages", size=1, dtype=torch.float32)
 
         # create temporary variables needed for storage and computation
         self._current_log_prob = []
@@ -282,7 +301,7 @@ class IRAT(MultiAgent):
         # sample stochastic actions
         with torch.autocast(device_type=self._device_type, enabled=self._mixed_precision):
             data = [
-                self.policies[uid].act({"states": self._state_preprocessor[uid](states[uid])}, role="policy")
+                self.idv_policies[uid].act({"states": self._state_preprocessor[uid](states[uid])}, role="policy")
                 for uid in self.possible_agents
             ]
 
@@ -331,7 +350,7 @@ class IRAT(MultiAgent):
             states, actions, rewards, next_states, terminated, truncated, infos, timestep, timesteps
         )
 
-        if self.memories:
+        if self.idv_memories:
             shared_states = infos["shared_states"]
             self._current_shared_next_states = infos["shared_next_states"]
 
@@ -342,7 +361,7 @@ class IRAT(MultiAgent):
 
                 # compute values
                 with torch.autocast(device_type=self._device_type, enabled=self._mixed_precision):
-                    values, _, _ = self.values[uid].act(
+                    values, _, _ = self.idv_values[uid].act(
                         {"states": self._shared_state_preprocessor[uid](shared_states)}, role="value"
                     )
                     values = self._value_preprocessor[uid](values, inverse=True)
@@ -352,7 +371,42 @@ class IRAT(MultiAgent):
                     rewards[uid] += self._discount_factor[uid] * values * truncated[uid]
 
                 # storage transition in memory
-                self.memories[uid].add_samples(
+                self.idv_memories[uid].add_samples(
+                    states=states[uid],
+                    actions=actions[uid],
+                    rewards=rewards[uid],
+                    next_states=next_states[uid],
+                    terminated=terminated[uid],
+                    truncated=truncated[uid],
+                    log_prob=self._current_log_prob[uid],
+                    values=values,
+                    shared_states=shared_states,
+                )
+                
+        if self.team_memories:
+            shared_states = infos["shared_states"]
+            self._current_shared_next_states = infos["shared_next_states"]
+
+            for uid in self.possible_agents:
+                # reward shaping
+                team_uid = "team_" + uid
+                
+                if self._rewards_shaper is not None:
+                    rewards[team_uid] = self._rewards_shaper(rewards[uid], timestep, timesteps)
+
+                # compute values
+                with torch.autocast(device_type=self._device_type, enabled=self._mixed_precision):
+                    values, _, _ = self.team_values[uid].act(
+                        {"states": self._shared_state_preprocessor[uid](shared_states)}, role="value"
+                    )
+                    values = self._value_preprocessor[uid](values, inverse=True)
+
+                # time-limit (truncation) bootstrapping
+                if self._time_limit_bootstrap[uid]:
+                    rewards[team_uid] += self._discount_factor[uid] * values * truncated[uid]
+
+                # storage transition in memory
+                self.team_memories[uid].add_samples(
                     states=states[uid],
                     actions=actions[uid],
                     rewards=rewards[uid],
@@ -433,7 +487,7 @@ class IRAT(MultiAgent):
 
             # advantages computation
             for i in reversed(range(memory_size)):
-                next_values = values[i + 1] if i < memory_size - 1 else last_values
+                next_values = values[i + 1] if i < memory_size - 1 else idv_last_values
                 advantage = (
                     rewards[i]
                     - values[i]
@@ -448,132 +502,136 @@ class IRAT(MultiAgent):
             return returns, advantages
 
         for uid in self.possible_agents:
-            policy = self.policies[uid]
-            value = self.values[uid]
-            memory = self.memories[uid]
+            idv_policy = self.idv_policies[uid]
+            idv_value = self.idv_values[uid]
+            idv_memory = self.idv_memories[uid]
+            
+            team_policy = self.team_policies[uid]
+            team_value = self.team_values[uid]
+            team_memory = self.team_memories[uid]
 
             # compute returns and advantages
             with torch.no_grad(), torch.autocast(device_type=self._device_type, enabled=self._mixed_precision):
-                value.train(False)
-                last_values, _, _ = value.act(
+                idv_value.train(False)
+                idv_last_values, _, _ = idv_value.act(
                     {"states": self._shared_state_preprocessor[uid](self._current_shared_next_states.float())},
                     role="value",
                 )
-                value.train(True)
-            last_values = self._value_preprocessor[uid](last_values, inverse=True)
+                idv_value.train(True)
+            idv_last_values = self._value_preprocessor[uid](idv_last_values, inverse=True)
 
-            values = memory.get_tensor_by_name("values")
-            returns, advantages = compute_gae(
-                rewards=memory.get_tensor_by_name("rewards"),
-                dones=memory.get_tensor_by_name("terminated") | memory.get_tensor_by_name("truncated"),
-                values=values,
-                next_values=last_values,
+            idv_values = idv_memory.get_tensor_by_name("values")
+            idv_returns, idv_advantages = compute_gae(
+                rewards=idv_memory.get_tensor_by_name("rewards"),
+                dones=idv_memory.get_tensor_by_name("terminated") | idv_memory.get_tensor_by_name("truncated"),
+                values=idv_values,
+                next_values=idv_last_values,
                 discount_factor=self._discount_factor[uid],
                 lambda_coefficient=self._lambda[uid],
             )
 
-            memory.set_tensor_by_name("values", self._value_preprocessor[uid](values, train=True))
-            memory.set_tensor_by_name("returns", self._value_preprocessor[uid](returns, train=True))
-            memory.set_tensor_by_name("advantages", advantages)
+            idv_memory.set_tensor_by_name("values", self._value_preprocessor[uid](idv_values, train=True))
+            idv_memory.set_tensor_by_name("returns", self._value_preprocessor[uid](idv_returns, train=True))
+            idv_memory.set_tensor_by_name("advantages", idv_advantages)
 
             # sample mini-batches from memory
-            sampled_batches = memory.sample_all(names=self._tensors_names, mini_batches=self._mini_batches[uid])
+            idv_sampled_batches = idv_memory.sample_all(names=self._tensors_names, mini_batches=self._mini_batches[uid])
 
-            cumulative_policy_loss = 0
-            cumulative_entropy_loss = 0
-            cumulative_value_loss = 0
+            idv_cumulative_policy_loss = 0
+            idv_cumulative_entropy_loss = 0
+            idv_cumulative_value_loss = 0
 
             # learning epochs
             for epoch in range(self._learning_epochs[uid]):
-                kl_divergences = []
+                idv_kl_divergences = []
 
-                # mini-batches loop
+                # mini-batches loop of individual agents
                 for (
-                    sampled_states,
-                    sampled_shared_states,
-                    sampled_actions,
-                    sampled_log_prob,
-                    sampled_values,
-                    sampled_returns,
-                    sampled_advantages,
-                ) in sampled_batches:
+                    idv_sampled_states,
+                    idv_sampled_shared_states,
+                    idv_sampled_actions,
+                    idv_sampled_log_prob,
+                    idv_sampled_values,
+                    idv_sampled_returns,
+                    idv_sampled_advantages,
+                ) in idv_sampled_batches:
 
                     with torch.autocast(device_type=self._device_type, enabled=self._mixed_precision):
 
-                        sampled_states = self._state_preprocessor[uid](sampled_states, train=not epoch)
-                        sampled_shared_states = self._shared_state_preprocessor[uid](
-                            sampled_shared_states, train=not epoch
+                        idv_sampled_states = self._state_preprocessor[uid](idv_sampled_states, train=not epoch)
+                        idv_sampled_shared_states = self._shared_state_preprocessor[uid](
+                            idv_sampled_shared_states, train=not epoch
                         )
 
-                        _, next_log_prob, _ = policy.act(
-                            {"states": sampled_states, "taken_actions": sampled_actions}, role="policy"
+                        _, idv_next_log_prob, _ = idv_policy.act(
+                            {"states": idv_sampled_states, "taken_actions": idv_sampled_actions}, role="policy"
                         )
 
                         # compute approximate KL divergence
                         with torch.no_grad():
-                            ratio = next_log_prob - sampled_log_prob
-                            kl_divergence = ((torch.exp(ratio) - 1) - ratio).mean()
-                            kl_divergences.append(kl_divergence)
+                            idv_ratio = idv_next_log_prob - idv_sampled_log_prob
+                            idv_kl_divergence = ((torch.exp(idv_ratio) - 1) - idv_ratio).mean()
+                            idv_kl_divergences.append(idv_kl_divergence)
 
                         # early stopping with KL divergence
-                        if self._kl_threshold[uid] and kl_divergence > self._kl_threshold[uid]:
+                        if self._kl_threshold[uid] and idv_kl_divergence > self._kl_threshold[uid]:
                             break
 
                         # compute entropy loss
                         if self._entropy_loss_scale[uid]:
-                            entropy_loss = -self._entropy_loss_scale[uid] * policy.get_entropy(role="policy").mean()
+                            idv_entropy_loss = -self._entropy_loss_scale[uid] * idv_policy.get_entropy(role="policy").mean()
                         else:
-                            entropy_loss = 0
+                            idv_entropy_loss = 0
 
                         # compute policy loss
-                        ratio = torch.exp(next_log_prob - sampled_log_prob)
-                        surrogate = sampled_advantages * ratio
-                        surrogate_clipped = sampled_advantages * torch.clip(
-                            ratio, 1.0 - self._ratio_clip[uid], 1.0 + self._ratio_clip[uid]
+                        idv_ratio = torch.exp(idv_next_log_prob - idv_sampled_log_prob)
+                        idv_surrogate = idv_sampled_advantages * idv_ratio
+                        idv_surrogate_clipped = idv_sampled_advantages * torch.clip(
+                            idv_ratio, 1.0 - self._ratio_clip[uid], 1.0 + self._ratio_clip[uid]
                         )
 
-                        policy_loss = -torch.min(surrogate, surrogate_clipped).mean()
+                        idv_policy_loss = -torch.min(idv_surrogate, idv_surrogate_clipped).mean()
 
                         # compute value loss
-                        predicted_values, _, _ = value.act({"states": sampled_shared_states}, role="value")
+                        idv_predicted_values, _, _ = idv_value.act({"states": idv_sampled_shared_states}, role="value")
 
                         if self._clip_predicted_values:
-                            predicted_values = sampled_values + torch.clip(
-                                predicted_values - sampled_values, min=-self._value_clip[uid], max=self._value_clip[uid]
+                            idv_predicted_values = idv_sampled_values + torch.clip(
+                                idv_predicted_values - idv_sampled_values, min=-self._value_clip[uid], max=self._value_clip[uid]
                             )
-                        value_loss = self._value_loss_scale[uid] * F.mse_loss(sampled_returns, predicted_values)
+                        idv_value_loss = self._value_loss_scale[uid] * F.mse_loss(idv_sampled_returns, idv_predicted_values)
 
                     # optimization step
                     self.optimizers[uid].zero_grad()
-                    self.scaler.scale(policy_loss + entropy_loss + value_loss).backward()
+                    self.scaler.scale(idv_policy_loss + idv_entropy_loss + idv_value_loss).backward()
 
                     if config.torch.is_distributed:
-                        policy.reduce_parameters()
-                        if policy is not value:
-                            value.reduce_parameters()
+                        idv_policy.reduce_parameters()
+                        if idv_policy is not idv_value:
+                            idv_value.reduce_parameters()
 
                     if self._grad_norm_clip[uid] > 0:
                         self.scaler.unscale_(self.optimizers[uid])
-                        if policy is value:
-                            nn.utils.clip_grad_norm_(policy.parameters(), self._grad_norm_clip[uid])
+                        if idv_policy is idv_value:
+                            nn.utils.clip_grad_norm_(idv_policy.parameters(), self._grad_norm_clip[uid])
                         else:
                             nn.utils.clip_grad_norm_(
-                                itertools.chain(policy.parameters(), value.parameters()), self._grad_norm_clip[uid]
+                                itertools.chain(idv_policy.parameters(), idv_value.parameters()), self._grad_norm_clip[uid]
                             )
 
                     self.scaler.step(self.optimizers[uid])
                     self.scaler.update()
 
                     # update cumulative losses
-                    cumulative_policy_loss += policy_loss.item()
-                    cumulative_value_loss += value_loss.item()
+                    idv_cumulative_policy_loss += idv_policy_loss.item()
+                    idv_cumulative_value_loss += idv_value_loss.item()
                     if self._entropy_loss_scale[uid]:
-                        cumulative_entropy_loss += entropy_loss.item()
+                        idv_cumulative_entropy_loss += idv_entropy_loss.item()
 
                 # update learning rate
                 if self._learning_rate_scheduler[uid]:
                     if isinstance(self.schedulers[uid], KLAdaptiveLR):
-                        kl = torch.tensor(kl_divergences, device=self.device).mean()
+                        kl = torch.tensor(idv_kl_divergences, device=self.device).mean()
                         # reduce (collect from all workers/processes) KL in distributed runs
                         if config.torch.is_distributed:
                             torch.distributed.all_reduce(kl, op=torch.distributed.ReduceOp.SUM)
@@ -585,20 +643,20 @@ class IRAT(MultiAgent):
             # record data
             self.track_data(
                 f"Loss / Policy loss ({uid})",
-                cumulative_policy_loss / (self._learning_epochs[uid] * self._mini_batches[uid]),
+                idv_cumulative_policy_loss / (self._learning_epochs[uid] * self._mini_batches[uid]),
             )
             self.track_data(
                 f"Loss / Value loss ({uid})",
-                cumulative_value_loss / (self._learning_epochs[uid] * self._mini_batches[uid]),
+                idv_cumulative_value_loss / (self._learning_epochs[uid] * self._mini_batches[uid]),
             )
             if self._entropy_loss_scale:
                 self.track_data(
                     f"Loss / Entropy loss ({uid})",
-                    cumulative_entropy_loss / (self._learning_epochs[uid] * self._mini_batches[uid]),
+                    idv_cumulative_entropy_loss / (self._learning_epochs[uid] * self._mini_batches[uid]),
                 )
 
             self.track_data(
-                f"Policy / Standard deviation ({uid})", policy.distribution(role="policy").stddev.mean().item()
+                f"Policy / Standard deviation ({uid})", idv_policy.distribution(role="policy").stddev.mean().item()
             )
 
             if self._learning_rate_scheduler[uid]:
