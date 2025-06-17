@@ -146,6 +146,10 @@ class Runner:
             from skrl.multi_agents.torch.happo import HAPPO, HAPPO_DEFAULT_CONFIG
 
             component = HAPPO_DEFAULT_CONFIG if "default_config" in name else HAPPO
+        elif name in ["irat", "irat_default_config"]:
+            from skrl.multi_agents.torch.irat import IRAT, IRAT_DEFAULT_CONFIG
+
+            component = IRAT_DEFAULT_CONFIG if "default_config" in name else IRAT
         # trainer
         elif name == "sequentialtrainer":
             from skrl.trainers.torch import SequentialTrainer as component
