@@ -552,7 +552,7 @@ class IRAT(MultiAgentIrat):
 
             idv_values = memory.get_tensor_by_name("idv_values")
             idv_returns, idv_advantages = compute_gae(
-                rewards=memory.get_tensor_by_name("rewards"),
+                rewards=memory.get_tensor_by_name("idv_rewards"),
                 dones=memory.get_tensor_by_name("terminated") | memory.get_tensor_by_name("truncated"),
                 values=idv_values,
                 next_values=idv_last_values,
