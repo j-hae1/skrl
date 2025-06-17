@@ -201,7 +201,7 @@ class IRAT(MultiAgentIrat):
         
         self._idv_ratio_clip = self._as_dict(self.cfg["idv_ratio_clip"])
         self._idv_kl_coef = self._as_dict(self.cfg.get("idv_kl_coef", 2.0))  # KL loss coefficient for individual policies
-        self._team_kl_coef = self._as_dict(self.cfg.get("team_kl_coef", 0.0))  # KL loss coefficient for individual policies
+        self._team_kl_coef = self._as_dict(self.cfg.get("team_kl_coef", 1.0))  # KL loss coefficient for individual policies
 
         # set up automatic mixed precision
         self._device_type = torch.device(device).type
