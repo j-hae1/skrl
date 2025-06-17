@@ -52,8 +52,7 @@ class MultiAgentIrat:
         self.idv_models = models
         self.team_models = copy.deepcopy(models)
                 
-        self.idv_memories = memories
-        self.team_memories = copy.deepcopy(memories) if memories is not None else {}
+        self.memories = memories
         self.observation_spaces = observation_spaces
         self.action_spaces = action_spaces
         self.cfg = cfg if cfg is not None else {}
