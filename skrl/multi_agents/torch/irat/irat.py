@@ -42,7 +42,7 @@ IRAT_DEFAULT_CONFIG = {
 
     "grad_norm_clip": 0.5,              # clipping coefficient for the norm of the gradients
     "ratio_clip": 0.2,                  # clipping coefficient for computing the clipped surrogate objective
-    "idv_ratio_clip": 3.0,                  # clipping coefficient for computing the clipped surrogate objective
+    "idv_ratio_clip": 0.5,                  # clipping coefficient for computing the clipped surrogate objective
     "value_clip": 0.2,                  # clipping coefficient for computing the value loss (if clip_predicted_values is True)
     "clip_predicted_values": False,     # clip predicted values during value loss computation
 
@@ -133,7 +133,9 @@ class IRAT(MultiAgentIrat):
             # checkpoint models
             self.checkpoint_modules[uid]["idv_policy"] = self.idv_policies[uid]
             self.checkpoint_modules[uid]["idv_value"] = self.idv_values[uid]
-
+            self.checkpoint_modules[uid]["team_policy"] = self.team_policies[uid]
+            self.checkpoint_modules[uid]["team_value"] = self.team_values[uid]
+            
             # broadcast models' parameters in distributed runs
             if config.torch.is_distributed:
                 logger.info(f"Broadcasting models' parameters")
@@ -141,6 +143,10 @@ class IRAT(MultiAgentIrat):
                     self.idv_policies[uid].broadcast_parameters()
                     if self.idv_values[uid] is not None and self.idv_policies[uid] is not self.idv_values[uid]:
                         self.idv_values[uid].broadcast_parameters()
+                if self.team_policies[uid] is not None:
+                    self.team_policies[uid].broadcast_parameters()
+                    if self.team_values[uid] is not None and self.team_policies[uid] is not self.team_values[uid]:
+                        self.team_values[uid].broadcast_parameters()
 
         # configuration
         self._learning_epochs = self._as_dict(self.cfg["learning_epochs"])
@@ -187,11 +193,15 @@ class IRAT(MultiAgentIrat):
         self._idv_use_cross_entropy = self.cfg.get("idv_use_cross_entropy", False)
         self._team_use_cross_entropy = self.cfg.get("team_use_cross_entropy", False)
         self._idv_clip_use_present = self.cfg.get("idv_clip_use_present", False)
+        self._team_clip_use_present = self.cfg.get("team_clip_use_present", False)
         self._idv_use_two_clip = self.cfg.get("idv_use_two_clip", True)
         self._idv_use_kl_loss = self.cfg.get("idv_use_kl_loss", True)
+        self._team_use_kl_loss = self.cfg.get("team_use_kl_loss", True)
+        self._team_use_clip = self.cfg.get("team_use_clip", True)
         
         self._idv_ratio_clip = self._as_dict(self.cfg["idv_ratio_clip"])
         self._idv_kl_coef = self._as_dict(self.cfg.get("idv_kl_coef", 2.0))  # KL loss coefficient for individual policies
+        self._team_kl_coef = self._as_dict(self.cfg.get("team_kl_coef", 0.0))  # KL loss coefficient for individual policies
 
         # set up automatic mixed precision
         self._device_type = torch.device(device).type
@@ -628,9 +638,14 @@ class IRAT(MultiAgentIrat):
             idv_cumulative_entropy_loss = 0
             idv_cumulative_value_loss = 0
 
+            team_cumulative_policy_loss = 0
+            team_cumulative_entropy_loss = 0
+            team_cumulative_value_loss = 0
+            
             # learning epochs
             for epoch in range(self._learning_epochs[uid]):
                 idv_kl_divergences = []
+                team_kl_divergences = []
 
                 # mini-batches loop of individual agents
                 for (
@@ -681,9 +696,21 @@ class IRAT(MultiAgentIrat):
                         idv_next_dists = idv_next_outputs["distribution"]
                         idv_next_entropy = idv_policy.get_entropy(role="policy").mean()
                         
+                        # compute approximate KL divergence
+                        with torch.no_grad():
+                            ratio = idv_next_log_prob - idv_sampled_log_prob
+                            kl_divergence = ((torch.exp(ratio) - 1) - ratio).mean()
+                            idv_kl_divergences.append(kl_divergence)
+                        
                         _, team_next_log_prob, team_next_outputs = team_policy.act(
                             {"states": sampled_states, "taken_actions": sampled_actions}, role="policy"
                         )
+                        
+                        # compute approximate KL divergence
+                        with torch.no_grad():
+                            ratio = team_next_log_prob - team_sampled_log_prob
+                            kl_divergence = ((torch.exp(ratio) - 1) - ratio).mean()
+                            team_kl_divergences.append(kl_divergence)
                         
                         team_next_dists = team_next_outputs["distribution"]
                         team_next_entropy = team_policy.get_entropy(role="policy").mean()
@@ -749,6 +776,38 @@ class IRAT(MultiAgentIrat):
                             )
                         idv_value_loss = self._value_loss_scale[uid] * F.mse_loss(idv_sampled_returns, idv_predicted_values)
 
+                        if self._team_clip_use_present:
+                            team_imp_weights = torch.exp(team_next_log_prob - idv_next_log_prob.clone().detach())
+                        else:
+                            team_imp_weights = torch.exp(team_next_log_prob - idv_sampled_log_prob.clone().detach())
+
+                        team_surr1 = team_sampled_advantages * team_imp_weights
+                        tclp = torch.clamp(team_imp_weights, 1.0 - self._ratio_clip[uid], 1.0 + self._ratio_clip[uid])
+                        team_surr2 = tclp * team_sampled_advantages
+                        
+                        team_min = team_surr1
+                        if self._team_use_clip:
+                            team_min = torch.min(team_surr1, team_surr2)
+                        policy_action_loss = (-1) * team_min.mean()
+                        team_policy_loss = policy_action_loss
+                        team_loss = policy_action_loss - team_next_entropy * self._entropy_loss_scale[uid]
+                        
+                        if self._team_use_kl_loss:
+                            team_loss += self._team_kl_coef[uid] * team_kl_loss
+                        elif self._team_use_cross_entropy:
+                            team_loss += self._team_kl_coef[uid] * team_cross_entropy
+                        else:
+                            team_kl_loss = torch.tensor(0.0, device=self.device)
+                            
+                        # compute TEAM value loss
+                        team_predicted_values, _, _ = team_value.act({"states": sampled_shared_states}, role="value")
+
+                        if self._clip_predicted_values:
+                            team_predicted_values = team_sampled_values + torch.clip(
+                                team_predicted_values - team_sampled_values, min=-self._value_clip[uid], max=self._value_clip[uid]
+                            )
+                        team_value_loss = self._value_loss_scale[uid] * F.mse_loss(team_sampled_returns, team_predicted_values)
+
                     # update individual actor
                     if torch.isnan(idv_loss).any():
                         print("idv loss has nan")
@@ -762,8 +821,17 @@ class IRAT(MultiAgentIrat):
                         print("idv imp_weights has nan")
                     if torch.isinf(idv_imp_weights).any():
                         print("idv imp_weights has inf")
+                    # update team actor
+                    if torch.isnan(team_loss).any():
+                        print("team loss has nan")
+                    if torch.isinf(team_loss).any():
+                        print("team loss has inf")
+                    if torch.isnan(team_imp_weights).any():
+                        print("team has nan")
+                    if torch.isinf(team_imp_weights).any():
+                        print("team has inf")
 
-                    # optimization step
+                    # optimization individual step
                     self.idv_optimizers[uid].zero_grad()
                     self.scaler.scale(idv_loss + idv_value_loss).backward()
 
@@ -794,8 +862,40 @@ class IRAT(MultiAgentIrat):
                             idv_cumulative_entropy_loss += idv_cross_entropy.item()
                         else:
                             idv_cumulative_entropy_loss += 0.0
+                            
+                    # optimization team step
+                    self.team_optimizers[uid].zero_grad()
+                    self.scaler.scale(team_loss + team_value_loss).backward()
 
-                # update learning rate
+                    if config.torch.is_distributed:
+                        team_policy.reduce_parameters()
+                        if team_policy is not team_value:
+                            team_value.reduce_parameters()
+
+                    if self._grad_norm_clip[uid] > 0:
+                        self.scaler.unscale_(self.team_optimizers[uid])
+                        if team_policy is team_value:
+                            nn.utils.clip_grad_norm_(team_policy.parameters(), self._grad_norm_clip[uid])
+                        else:
+                            nn.utils.clip_grad_norm_(
+                                itertools.chain(team_policy.parameters(), team_value.parameters()), self._grad_norm_clip[uid]
+                            )
+
+                    self.scaler.step(self.team_optimizers[uid])
+                    self.scaler.update()
+
+                    # update cumulative losses
+                    team_cumulative_policy_loss += team_policy_loss.item()
+                    team_cumulative_value_loss += team_value_loss.item()
+                    if self._entropy_loss_scale[uid]:
+                        if self._team_use_kl_loss:
+                            team_cumulative_entropy_loss += team_kl_loss.item()
+                        elif self._idv_use_cross_entropy:
+                            team_cumulative_entropy_loss += team_cross_entropy.item()
+                        else:
+                            team_cumulative_entropy_loss += 0.0
+
+                # update individual policy learning rate
                 if self._learning_rate_scheduler[uid]:
                     if isinstance(self.idv_schedulers[uid], KLAdaptiveLR):
                         kl = torch.tensor(idv_kl_divergences, device=self.device).mean()
@@ -806,25 +906,59 @@ class IRAT(MultiAgentIrat):
                         self.idv_schedulers[uid].step(kl.item())
                     else:
                         self.idv_schedulers[uid].step()
+                        
+                # update team policy learning rate
+                if self._learning_rate_scheduler[uid]:
+                    if isinstance(self.team_schedulers[uid], KLAdaptiveLR):
+                        kl = torch.tensor(team_kl_divergences, device=self.device).mean()
+                        # reduce (collect from all workers/processes) KL in distributed runs
+                        if config.torch.is_distributed:
+                            torch.distributed.all_reduce(kl, op=torch.distributed.ReduceOp.SUM)
+                            kl /= config.torch.world_size
+                        self.team_schedulers[uid].step(kl.item())
+                    else:
+                        self.team_schedulers[uid].step()
 
-            # record data
+            # record individual data
             self.track_data(
-                f"Loss / Policy loss ({uid})",
+                f"Loss / individual Policy loss ({uid})",
                 idv_cumulative_policy_loss / (self._learning_epochs[uid] * self._mini_batches[uid]),
             )
             self.track_data(
-                f"Loss / Value loss ({uid})",
+                f"Loss / individual Value loss ({uid})",
                 idv_cumulative_value_loss / (self._learning_epochs[uid] * self._mini_batches[uid]),
             )
             if self._entropy_loss_scale:
                 self.track_data(
-                    f"Loss / Entropy loss ({uid})",
+                    f"Loss / individual Entropy loss ({uid})",
                     idv_cumulative_entropy_loss / (self._learning_epochs[uid] * self._mini_batches[uid]),
                 )
 
             self.track_data(
-                f"Policy / Standard deviation ({uid})", idv_policy.distribution(role="policy").stddev.mean().item()
+                f"Policy / individual Standard deviation ({uid})", idv_policy.distribution(role="policy").stddev.mean().item()
             )
 
             if self._learning_rate_scheduler[uid]:
-                self.track_data(f"Learning / Learning rate individual ({uid})", self.idv_schedulers[uid].get_last_lr()[0])
+                self.track_data(f"Learning / individual Learning rate individual ({uid})", self.idv_schedulers[uid].get_last_lr()[0])
+
+            # record team data
+            self.track_data(
+                f"Loss / team Policy loss ({uid})",
+                team_cumulative_policy_loss / (self._learning_epochs[uid] * self._mini_batches[uid]),
+            )
+            self.track_data(
+                f"Loss / team Value loss ({uid})",
+                team_cumulative_value_loss / (self._learning_epochs[uid] * self._mini_batches[uid]),
+            )
+            if self._entropy_loss_scale:
+                self.track_data(
+                    f"Loss / team Entropy loss ({uid})",
+                    team_cumulative_entropy_loss / (self._learning_epochs[uid] * self._mini_batches[uid]),
+                )
+
+            self.track_data(
+                f"Policy / team Standard deviation ({uid})", team_policy.distribution(role="policy").stddev.mean().item()
+            )
+
+            if self._learning_rate_scheduler[uid]:
+                self.track_data(f"Learning / team Learning rate individual ({uid})", self.team_schedulers[uid].get_last_lr()[0])
