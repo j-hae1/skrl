@@ -208,7 +208,7 @@ class IRAT(MultiAgentIrat):
         self._team_use_clip = self.cfg.get("team_use_clip", True)
         
         self._idv_ratio_clip = self._as_dict(self.cfg["idv_ratio_clip"])
-        self._idv_kl_coef = self._as_dict(self.cfg.get("idv_kl_coef", 0.0))  # KL loss coefficient for individual policies
+        self._idv_kl_scale = self._as_dict(self.cfg.get("idv_kl_scale", 0.0))  # KL loss coefficient for individual policies
         self._team_kl_coef = self._as_dict(self.cfg.get("team_kl_coef", 100.0))  # KL loss coefficient for individual policies
 
         # set up automatic mixed precision
@@ -548,7 +548,7 @@ class IRAT(MultiAgentIrat):
         # write tracking data and checkpoints
         super().post_interaction(timestep, timesteps)
 
-    # def _update(self, timestep: int, timesteps: int) -> None:
+    # def _update__(self, timestep: int, timesteps: int) -> None:
     #     """Algorithm's main update step
 
     #     :param timestep: Current timestep
@@ -999,6 +999,7 @@ class IRAT(MultiAgentIrat):
 
     #         if self._learning_rate_scheduler[uid]:
     #             self.track_data(f"Learning / team Learning rate individual ({uid})", self.team_schedulers[uid].get_last_lr()[0])
+    
     def _update(self, timestep: int, timesteps: int) -> None:
         """Algorithm's main update step
 
@@ -1118,6 +1119,7 @@ class IRAT(MultiAgentIrat):
 
             idv_cumulative_policy_loss = 0
             idv_cumulative_entropy_loss = 0
+            idv_cumulative_irat_kl_loss = 0
             idv_cumulative_value_loss = 0
 
             team_cumulative_policy_loss = 0
@@ -1150,15 +1152,25 @@ class IRAT(MultiAgentIrat):
 
                     # TRAIN INDIVIDUAL policy
                     with torch.autocast(device_type=self._device_type, enabled=self._mixed_precision):
+                        
+                        idv_sampled_dists = torch.distributions.Normal(
+                            loc=idv_sampled_dists_loc.clone().detach(),
+                            scale=idv_sampled_dists_scale.clone().detach(),
+                        )
+                        team_sampled_dists = torch.distributions.Normal(
+                            loc=team_sampled_dists_loc.clone().detach(),
+                            scale=team_sampled_dists_scale.clone().detach(),
+                        )
 
                         idv_sampled_states = self._idv_state_preprocessor[uid](sampled_states, train=not epoch)
                         idv_sampled_shared_states = self._idv_shared_state_preprocessor[uid](
                             sampled_shared_states, train=not epoch
                         )
 
-                        _, idv_next_log_prob, _ = idv_policy.act(
+                        _, idv_next_log_prob, idv_next_outputs = idv_policy.act(
                             {"states": idv_sampled_states, "taken_actions": sampled_actions}, role="policy"
                         )
+                        idv_next_dists = idv_next_outputs["distribution"]
 
                         # compute approximate KL divergence
                         with torch.no_grad():
@@ -1183,7 +1195,25 @@ class IRAT(MultiAgentIrat):
                             idv_ratio, 1.0 - self._ratio_clip[uid], 1.0 + self._ratio_clip[uid]
                         )
 
-                        idv_policy_loss = -torch.min(idv_surrogate, idv_surrogate_clipped).mean()
+                        idv_min = torch.min(idv_surrogate, idv_surrogate_clipped).mean()
+                        # idv_policy_loss = -torch.min(idv_surrogate, idv_surrogate_clipped).mean()
+                        
+                        # policy loss with so_ratio
+                        so_ratio = torch.exp(idv_next_log_prob - team_sampled_log_prob)
+                        idv_surrogate_clipped_so = idv_sampled_advantages * torch.clip(
+                            so_ratio, 1.0 - self._idv_ratio_clip[uid], 1.0 + self._idv_ratio_clip[uid]
+                        )
+                        if self._idv_use_two_clip:
+                            gt_one = so_ratio > 1.0
+                            le_one = so_ratio <= 1.0
+                            # idv_min = torch.min(idv_min, idv_surr3) it is original code, but i think it is wrong.
+                            idv_min = torch.where(
+                                gt_one, 
+                                torch.min(idv_min, idv_surrogate_clipped_so),  # if so_weights > 1 → min
+                                torch.max(idv_min, idv_surrogate_clipped_so)   # else (≤1) → max
+                            )
+                            
+                        idv_policy_loss = (-1) * idv_min
 
                         # compute value loss
                         idv_predicted_values, _, _ = idv_value.act({"states": idv_sampled_shared_states}, role="value")
@@ -1193,10 +1223,17 @@ class IRAT(MultiAgentIrat):
                                 idv_predicted_values - idv_sampled_values, min=-self._value_clip[uid], max=self._value_clip[uid]
                             )
                         idv_value_loss = self._value_loss_scale[uid] * F.mse_loss(idv_sampled_returns, idv_predicted_values)
+                        
+                        # compute idv kl loss
+                        idv_kl_loss = torch.distributions.kl_divergence(team_sampled_dists, idv_next_dists).mean()
+                        if self._idv_use_kl_loss:
+                            idv_kl_loss *= self._idv_kl_scale[uid]
+                        else:  # no kl loss
+                            idv_kl_loss *= 0.0
 
                     # INDIVIDUAL optimization step
                     self.idv_optimizers[uid].zero_grad()
-                    self.scaler.scale(idv_policy_loss + idv_entropy_loss + idv_value_loss).backward()
+                    self.scaler.scale(idv_policy_loss + idv_entropy_loss + idv_kl_loss + idv_value_loss).backward()
 
                     if config.torch.is_distributed:
                         idv_policy.reduce_parameters()
@@ -1220,6 +1257,8 @@ class IRAT(MultiAgentIrat):
                     idv_cumulative_value_loss += idv_value_loss.item()
                     if self._entropy_loss_scale[uid]:
                         idv_cumulative_entropy_loss += idv_entropy_loss.item()
+                    if self._idv_use_kl_loss:
+                        idv_cumulative_irat_kl_loss += idv_kl_loss.item()
                         
                     # TRAIN TEAM policy
                     with torch.autocast(device_type=self._device_type, enabled=self._mixed_precision):
@@ -1331,6 +1370,11 @@ class IRAT(MultiAgentIrat):
                 self.track_data(
                     f"Loss / INDIVIDUAL Entropy loss ({uid})",
                     idv_cumulative_entropy_loss / (self._learning_epochs[uid] * self._mini_batches[uid]),
+                )
+            if self._idv_use_kl_loss:
+                self.track_data(
+                    f"Loss / INDIVIDUAL irat kl loss ({uid})",
+                    idv_cumulative_irat_kl_loss / (self._learning_epochs[uid] * self._mini_batches[uid]),
                 )
 
             self.track_data(
