@@ -47,7 +47,7 @@ IRAT_DEFAULT_CONFIG = {
     "value_clip": 0.2,                  # clipping coefficient for computing the value loss (if clip_predicted_values is True)
     "clip_predicted_values": False,     # clip predicted values during value loss computation
 
-    "entropy_loss_scale": 0.0,      # entropy loss scaling factor
+    "entropy_loss_scale": 0.2,      # entropy loss scaling factor
     "value_loss_scale": 1.0,        # value loss scaling factor
 
     "kl_threshold": 0,              # KL divergence threshold for early stopping
@@ -1198,7 +1198,7 @@ class IRAT(MultiAgentIrat):
                             idv_ratio, 1.0 - self._ratio_clip[uid], 1.0 + self._ratio_clip[uid]
                         )
 
-                        idv_min = torch.min(idv_surrogate, idv_surrogate_clipped).mean()
+                        idv_min = torch.min(idv_surrogate, idv_surrogate_clipped)  # .mean()
                         # idv_policy_loss = -torch.min(idv_surrogate, idv_surrogate_clipped).mean()
                         
                         # policy loss with so_ratio
@@ -1208,7 +1208,6 @@ class IRAT(MultiAgentIrat):
                         )
                         if self._idv_use_two_clip:
                             gt_one = so_ratio > 1.0
-                            le_one = so_ratio <= 1.0
                             # idv_min = torch.min(idv_min, idv_surr3) it is original code, but i think it is wrong.
                             idv_min = torch.where(
                                 gt_one, 
@@ -1216,7 +1215,7 @@ class IRAT(MultiAgentIrat):
                                 torch.max(idv_min, idv_surrogate_clipped_so)   # else (≤1) → max
                             )
                             
-                        idv_policy_loss = (-1) * idv_min
+                        idv_policy_loss = (-1) * idv_min.mean()
 
                         # compute value loss
                         idv_predicted_values, _, _ = idv_value.act({"states": idv_sampled_shared_states}, role="value")
