@@ -107,7 +107,7 @@ class IRAT_SEPARATE(MultiAgentIrat):
         :param shared_observation_spaces: Shared observation/state space or shape (default: ``None``)
         :type shared_observation_spaces: dictionary of int, sequence of int or gymnasium.Space, optional
         """
-        _cfg = copy.deepcopy(IRAT_DEFAULT_CONFIG)
+        _cfg = copy.deepcopy(IRAT_SEPARATE_DEFAULT_CONFIG)
         _cfg.update(cfg if cfg is not None else {})
         super().__init__(
             possible_agents=possible_agents,
