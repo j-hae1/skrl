@@ -43,6 +43,7 @@ IRAT_DEFAULT_CONFIG = {
     "grad_norm_clip": 0.5,              # clipping coefficient for the norm of the gradients
     "ratio_clip": 0.2,                  # clipping coefficient for computing the clipped surrogate objective
     "idv_ratio_clip": 0.5,                  # clipping coefficient for computing the clipped surrogate objective
+    "team_ratio_clip": 0.2,                  # clipping coefficient for computing the clipped surrogate objective
     "value_clip": 0.2,                  # clipping coefficient for computing the value loss (if clip_predicted_values is True)
     "clip_predicted_values": False,     # clip predicted values during value loss computation
 
@@ -202,14 +203,15 @@ class IRAT(MultiAgentIrat):
         self._team_use_cross_entropy = self.cfg.get("team_use_cross_entropy", False)
         self._idv_clip_use_present = self.cfg.get("idv_clip_use_present", False)
         self._team_clip_use_present = self.cfg.get("team_clip_use_present", False)
-        self._idv_use_two_clip = self.cfg.get("idv_use_two_clip", False)
+        self._idv_use_two_clip = self.cfg.get("idv_use_two_clip", True)
         self._idv_use_kl_loss = self.cfg.get("idv_use_kl_loss", True)
         self._team_use_kl_loss = self.cfg.get("team_use_kl_loss", True)
         self._team_use_clip = self.cfg.get("team_use_clip", True)
         
         self._idv_ratio_clip = self._as_dict(self.cfg["idv_ratio_clip"])
-        self._idv_kl_scale = self._as_dict(self.cfg.get("idv_kl_scale", 0.0))  # KL loss coefficient for individual policies
-        self._team_kl_coef = self._as_dict(self.cfg.get("team_kl_coef", 100.0))  # KL loss coefficient for individual policies
+        self._team_ratio_clip = self._as_dict(self.cfg["team_ratio_clip"])
+        self._idv_kl_scale = self._as_dict(self.cfg.get("idv_kl_scale", 2.0))  # KL loss coefficient for individual policies
+        self._team_kl_scale = self._as_dict(self.cfg.get("team_kl_scale", 1.0))  # KL loss coefficient for individual policies
 
         # set up automatic mixed precision
         self._device_type = torch.device(device).type
@@ -1124,6 +1126,7 @@ class IRAT(MultiAgentIrat):
 
             team_cumulative_policy_loss = 0
             team_cumulative_entropy_loss = 0
+            team_cumulative_irat_kl_loss = 0
             team_cumulative_value_loss = 0
 
             # learning epochs
@@ -1268,9 +1271,10 @@ class IRAT(MultiAgentIrat):
                             sampled_shared_states, train=not epoch
                         )
 
-                        _, team_next_log_prob, _ = team_policy.act(
+                        _, team_next_log_prob, team_next_outputs = team_policy.act(
                             {"states": team_sampled_states, "taken_actions": sampled_actions}, role="policy"
                         )
+                        team_next_dists = team_next_outputs["distribution"]
 
                         # compute approximate KL divergence
                         with torch.no_grad():
@@ -1289,13 +1293,21 @@ class IRAT(MultiAgentIrat):
                             team_entropy_loss = 0
 
                         # compute policy loss
-                        team_ratio = torch.exp(team_next_log_prob - team_sampled_log_prob)
-                        team_surrogate = team_sampled_advantages * team_ratio
-                        team_surrogate_clipped = team_sampled_advantages * torch.clip(
-                            team_ratio, 1.0 - self._ratio_clip[uid], 1.0 + self._ratio_clip[uid]
+                        # team_ratio = torch.exp(team_next_log_prob - team_sampled_log_prob)
+                        # team_surrogate = team_sampled_advantages * team_ratio
+                        # team_surrogate_clipped = team_sampled_advantages * torch.clip(
+                        #     team_ratio, 1.0 - self._ratio_clip[uid], 1.0 + self._ratio_clip[uid]
+                        # )
+
+                        # team_policy_loss = -torch.min(team_surrogate, team_surrogate_clipped).mean()
+                        
+                        team_irat_ratio = torch.exp(team_next_log_prob - idv_sampled_log_prob)
+                        team_surrogate_irat = team_sampled_advantages * team_irat_ratio
+                        team_surrogate_clipped_irat = team_sampled_advantages * torch.clip(
+                            team_irat_ratio, 1.0 - self._team_ratio_clip[uid], 1.0 + self._team_ratio_clip[uid]
                         )
 
-                        team_policy_loss = -torch.min(team_surrogate, team_surrogate_clipped).mean()
+                        team_policy_loss = -torch.min(team_surrogate_irat, team_surrogate_clipped_irat).mean()
 
                         # compute value loss
                         team_predicted_values, _, _ = team_value.act({"states": team_sampled_shared_states}, role="value")
@@ -1305,10 +1317,17 @@ class IRAT(MultiAgentIrat):
                                 team_predicted_values - team_sampled_values, min=-self._value_clip[uid], max=self._value_clip[uid]
                             )
                         team_value_loss = self._value_loss_scale[uid] * F.mse_loss(team_sampled_returns, team_predicted_values)
+                        
+                        # team kl loss
+                        team_kl_loss = torch.distributions.kl_divergence(idv_sampled_dists, team_next_dists).mean()
+                        if self._team_use_kl_loss:
+                            team_kl_loss *= self._team_kl_scale[uid]
+                        else:  # no kl loss
+                            team_kl_loss *= 0.0
 
                     # TEAM optimization step
                     self.team_optimizers[uid].zero_grad()
-                    self.scaler.scale(team_policy_loss + team_entropy_loss + team_value_loss).backward()
+                    self.scaler.scale(team_policy_loss + team_entropy_loss + team_kl_loss + team_value_loss).backward()
 
                     if config.torch.is_distributed:
                         team_policy.reduce_parameters()
@@ -1332,6 +1351,8 @@ class IRAT(MultiAgentIrat):
                     team_cumulative_value_loss += team_value_loss.item()
                     if self._entropy_loss_scale[uid]:
                         team_cumulative_entropy_loss += team_entropy_loss.item()
+                    if self._team_use_kl_loss:
+                        team_cumulative_irat_kl_loss += team_kl_loss.item()
 
                 # update INDIVIDUAL POLICY learning rate
                 if self._learning_rate_scheduler[uid]:
@@ -1397,6 +1418,11 @@ class IRAT(MultiAgentIrat):
                 self.track_data(
                     f"Loss / TEAM Entropy loss ({uid})",
                     team_cumulative_entropy_loss / (self._learning_epochs[uid] * self._mini_batches[uid]),
+                )
+            if self._team_use_kl_loss:
+                self.track_data(
+                    f"Loss / team irat kl loss ({uid})",
+                    team_cumulative_irat_kl_loss / (self._learning_epochs[uid] * self._mini_batches[uid]),
                 )
 
             self.track_data(
