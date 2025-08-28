@@ -554,7 +554,7 @@ class RunnerMC:  # Runner for Multi-Critic agents
                 "shared_observation_spaces": state_spaces,
                 "possible_agents": possible_agents,
             }
-        elif agent_class in ["happo"]:
+        elif agent_class in ["happo", "happomc"]:
             agent_cfg = self._component(f"{agent_class}_DEFAULT_CONFIG").copy()
             agent_cfg.update(self._process_cfg(cfg["agent"]))
             agent_cfg["state_preprocessor_kwargs"].update(
