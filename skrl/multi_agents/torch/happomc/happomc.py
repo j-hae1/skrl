@@ -121,24 +121,48 @@ class HAPPOMC(MultiAgentMC):
             cfg=_cfg,
         )
 
+        # critic groups
+        if 'critic_groups' in self.cfg:
+            self.critic_groups = self.cfg['critic_groups']
+            self.value_names = [f"value_{group_name}" for group_name in self.critic_groups]
+
+        else:
+            raise ValueError("You must specify 'critic_groups' in the config for HAPPOMC")
         self.shared_observation_spaces = shared_observation_spaces
 
         # models
         self.policies = {uid: self.models[uid].get("policy", None) for uid in self.possible_agents}
-        self.values = {uid: self.models[uid].get("value", None) for uid in self.possible_agents}
+        self.values = []
+        for g in self.critic_groups:
+            setattr(self, f"value_{g}", {})  
+        for uid in self.possible_agents:
+            for g in self.critic_groups:
+                key = f"value_{g}"            # e.g., "value_upper"
+                model = self.models[uid].get(key, None)
+                if model is None:
+                    raise KeyError(f"Missing model '{key}' for agent '{uid}'")
+                # >>> 여기서 속성 dict에 uid 매핑으로 저장
+                getattr(self, key)[uid] = model
+
+        self.values = {f"value_{g}": getattr(self, f"value_{g}") for g in self.critic_groups}
 
         for uid in self.possible_agents:
             # checkpoint models
             self.checkpoint_modules[uid]["policy"] = self.policies[uid]
-            self.checkpoint_modules[uid]["value"] = self.values[uid]
+            # self.checkpoint_modules[uid]["value"] = self.values[uid]
+            for k in self.values.keys():   # k is like "value_upper"
+                self.checkpoint_modules[uid][k] = self.values[k][uid]
 
             # broadcast models' parameters in distributed runs
             if config.torch.is_distributed:
                 logger.info(f"Broadcasting models' parameters")
                 if self.policies[uid] is not None:
                     self.policies[uid].broadcast_parameters()
-                    if self.values[uid] is not None and self.policies[uid] is not self.values[uid]:
-                        self.values[uid].broadcast_parameters()
+                    # if self.values[uid] is not None and self.policies[uid] is not self.values[uid]:
+                    #     self.values[uid].broadcast_parameters()
+                for k in self.values.keys():   # k is like "value_upper"
+                    if self.values[k][uid] is not None:
+                        self.values[k][uid].broadcast_parameters()
 
         # configuration
         self._learning_epochs = self._as_dict(self.cfg["learning_epochs"])
