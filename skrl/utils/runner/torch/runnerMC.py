@@ -267,9 +267,7 @@ class RunnerMC:  # Runner for Multi-Critic agents
                         # if role is value, then num_critic value generated for Multi-Critic
                         if role == "value":
                             observation_space = state_spaces[agent_id]
-                            
-                            value_models = nn.ModuleDict()  # key: group name, value: model instance
-                            
+                                                        
                             for gname in critic_group_list:
                                 source = model_class(
                                     observation_space=observation_space,
@@ -283,15 +281,14 @@ class RunnerMC:  # Runner for Multi-Critic agents
                                 print("==================================================\n")
                                 print(source)
                                 print("--------------------------------------------------")
-
-                                value_models[gname] = model_class(
+                                
+                                models_name = f"{role}_{gname}"
+                                models[agent_id][models_name] = model_class(
                                     observation_space=observation_space,
                                     action_space=action_spaces[agent_id],
                                     device=device,
                                     **self._process_cfg(models_cfg[role]),
                                 )
-
-                            models[agent_id][role] = value_models
                             
                         else:  # other roles (e.g., policy) are single models
                             observation_space = observation_spaces[agent_id]
