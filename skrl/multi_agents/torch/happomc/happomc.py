@@ -215,13 +215,20 @@ class HAPPOMC(MultiAgentMC):
 
         for uid in self.possible_agents:
             policy = self.policies[uid]
-            value = self.values[uid]
-            if policy is not None and value is not None:
-                if policy is value:
+            # value = self.values[uid]
+            
+            value_models = [self.values[k][uid] for k in self.values.keys() if uid in self.values[k]]
+            
+            if policy is not None or value_models:
+                if not value_models:   # value가 전혀 없을 때
                     optimizer = torch.optim.Adam(policy.parameters(), lr=self._learning_rate[uid])
                 else:
                     optimizer = torch.optim.Adam(
-                        itertools.chain(policy.parameters(), value.parameters()), lr=self._learning_rate[uid]
+                        itertools.chain(
+                            policy.parameters() if policy is not None else [],
+                            itertools.chain.from_iterable(vm.parameters() for vm in value_models)
+                        ),
+                        lr=self._learning_rate[uid]
                     )
                 self.optimizers[uid] = optimizer
                 if self._learning_rate_scheduler[uid] is not None:
