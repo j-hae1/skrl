@@ -392,9 +392,22 @@ class MultiAgentMC:  # MC: Multi-Critic
         :param mode: Mode: 'train' for training or 'eval' for evaluation
         :type mode: str
         """
+        # for _models in self.models.values():
+        #     for model in _models.values():
+        #         if model is not None:
+        #             model.set_mode(mode)
         for _models in self.models.values():
             for model in _models.values():
-                if model is not None:
+                if model is None:
+                    continue
+
+                # If the model is a ModuleDict (e.g., multiple value networks grouped together),
+                # iterate through its sub-models and set their mode individually
+                if isinstance(model, nn.ModuleDict):
+                    for sub_model in model.values():
+                        if sub_model is not None:
+                            sub_model.set_mode(mode)
+                else:  # Otherwise, directly set the mode of the single model
                     model.set_mode(mode)
 
     def set_running_mode(self, mode: str) -> None:
