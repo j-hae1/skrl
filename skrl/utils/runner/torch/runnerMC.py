@@ -148,6 +148,10 @@ class RunnerMC:  # Runner for Multi-Critic agents
             from skrl.multi_agents.torch.happo import HAPPO, HAPPO_DEFAULT_CONFIG
 
             component = HAPPO_DEFAULT_CONFIG if "default_config" in name else HAPPO
+        elif name in ["happomc", "happomc_default_config"]:
+            from skrl.multi_agents.torch.happomc import HAPPOMC, HAPPO_MC_DEFAULT_CONFIG
+
+            component = HAPPO_MC_DEFAULT_CONFIG if "default_config" in name else HAPPOMC
         elif name in ["irat", "irat_default_config"]:
             from skrl.multi_agents.torch.irat import IRAT, IRAT_DEFAULT_CONFIG
 
@@ -259,7 +263,7 @@ class RunnerMC:  # Runner for Multi-Critic agents
                     del models_cfg[role]["class"]
                     model_class = self._component(model_class)
                     
-                    if agent_class in ["mappo", "happo", "irat", "irat_separate"]:
+                    if agent_class in ["happomc"]:
                         # if role is value, then num_critic value generated for Multi-Critic
                         if role == "value":
                             observation_space = state_spaces[agent_id]
@@ -274,7 +278,7 @@ class RunnerMC:  # Runner for Multi-Critic agents
                                     **self._process_cfg(models_cfg[role]),
                                     return_source=True,
                                 )
-                                print("==================================================")
+                                print("==============================================")
                                 print(f"Model (role): {role} (group: {gname})")
                                 print("==================================================\n")
                                 print(source)
@@ -314,6 +318,8 @@ class RunnerMC:  # Runner for Multi-Critic agents
                     else:
                         # get specific spaces according to agent/model cfg
                         observation_space = observation_spaces[agent_id]
+                        if (agent_class == "mappo" or agent_class == "happo" or agent_class == "irat" or agent_class == "irat_separate") and role == "value":
+                            observation_space = state_spaces[agent_id]
                         if agent_class == "amp" and role == "discriminator":
                             try:
                                 observation_space = env.amp_observation_space
