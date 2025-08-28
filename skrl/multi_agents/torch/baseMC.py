@@ -9,6 +9,7 @@ from packaging import version
 
 import numpy as np
 import torch
+import torch.nn as nn
 from torch.utils.tensorboard import SummaryWriter
 
 from skrl import config, logger
@@ -58,9 +59,21 @@ class MultiAgentMC:  # MC: Multi-Critic
         self.device = config.torch.parse_device(device)
 
         # convert the models to their respective device
+        # for _models in self.models.values():
+        #     for model in _models.values():
+        #         if model is not None:
+        #             model.to(model.device)
         for _models in self.models.values():
             for model in _models.values():
-                if model is not None:
+                if model is None:
+                    continue
+
+                # ModuleDict이면 안쪽의 모듈들을 다시 꺼내서 이동
+                if isinstance(model, nn.ModuleDict):
+                    for sub_model in model.values():
+                        if sub_model is not None:
+                            sub_model.to(sub_model.device)
+                else:
                     model.to(model.device)
 
         self.tracking_data = collections.defaultdict(list)
