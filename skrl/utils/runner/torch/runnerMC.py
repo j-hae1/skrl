@@ -237,6 +237,16 @@ class RunnerMC:  # Runner for Multi-Critic agents
             except KeyError:
                 separate = True
                 logger.warning("No 'separate' field defined in 'models' cfg. Defining it as True by default")
+            # extract critic_groups 
+            try:
+                critic_group_list = models_cfg.get("value", {}).get("critic_groups", None)
+                num_critics = len(critic_group_list)
+                del models_cfg["value"]["critic_groups"]
+            except KeyError:
+                raise ValueError("No 'critic_groups' field defined in 'models:value' cfg. It is required for Multi-Critic")
+            if num_critics == 0:
+                raise ValueError("'critic_groups' field in 'models:value' cfg must be a non-empty list")
+            
             # non-shared models
             if separate:
                 for role in models_cfg:
@@ -252,16 +262,11 @@ class RunnerMC:  # Runner for Multi-Critic agents
                     if agent_class in ["mappo", "happo", "irat", "irat_separate"]:
                         # if role is value, then num_critic value generated for Multi-Critic
                         if role == "value":
-                            group_list = role_cfg.pop("groups", None)  # ← ["upper", "lower", "task", ...]
-                            if group_list is None or not isinstance(group_list, (list, tuple)) or len(group_list) == 0:
-                                raise ValueError("models:value.groups must be a non-empty list")
-                            num_critics = len(group_list)
-                            
                             observation_space = state_spaces[agent_id]
                             
                             value_models = nn.ModuleDict()  # key: group name, value: model instance
                             
-                            for gname in group_list:
+                            for gname in critic_group_list:
                                 source = model_class(
                                     observation_space=observation_space,
                                     action_space=action_spaces[agent_id],
