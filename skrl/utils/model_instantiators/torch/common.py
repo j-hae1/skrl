@@ -273,14 +273,26 @@ def get_num_units(token: Union[str, Any]) -> Union[str, Any]:
     """
     num_units = {
         "ONE": "1",
+        "TWO": "2",
         "THREE": "3",
-        "CRITICS": "self.num_critics",
+        "FOUR": "4",
+        "FIVE": "5",
+        "SIX": "6",
+        "SEVEN": "7",
+        "EIGHT": "8",
+        "NINE": "9",
+        "TEN": "10",
         "STATES": "self.num_observations",
         "OBSERVATIONS": "self.num_observations",
         "ACTIONS": "self.num_actions",
         "STATES_ACTIONS": "self.num_observations + self.num_actions",
         "OBSERVATIONS_ACTIONS": "self.num_observations + self.num_actions",
     }
+    
+    # raise Error when token does not exist in the dictionary
+    if type(token) is str and token not in num_units:
+        raise ValueError(f"Unknown token: {token}")
+    
     token_as_str = str(token).replace("Shape.", "")
     if token_as_str in num_units:
         return num_units[token_as_str]
