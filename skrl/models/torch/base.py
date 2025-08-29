@@ -21,7 +21,7 @@ class Model(torch.nn.Module):
         observation_space: Union[int, Sequence[int], gymnasium.Space],
         action_space: Union[int, Sequence[int], gymnasium.Space],
         device: Optional[Union[str, torch.device]] = None,
-        num_critics: Optional[int] = None,
+        # num_critics: Optional[int] = None,
     ) -> None:
         """Base class representing a function approximator
 
@@ -69,7 +69,7 @@ class Model(torch.nn.Module):
         self.num_observations = None if observation_space is None else compute_space_size(observation_space)
         self.num_actions = None if action_space is None else compute_space_size(action_space)
         
-        self.num_critics = None if num_critics is None else num_critics
+        # self.num_critics = None if num_critics is None else num_critics
 
         self._random_distribution = None
 

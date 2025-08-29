@@ -15,6 +15,7 @@ class Shape(Enum):
     """
 
     ONE = 1
+    THREE = 3
     STATES = 0
     OBSERVATIONS = 0
     ACTIONS = -1

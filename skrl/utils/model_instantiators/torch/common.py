@@ -130,6 +130,7 @@ def _parse_output(source: Union[str, Sequence[str]]) -> Tuple[Union[str, Sequenc
         source = source.replace(
             "Shape.ACTIONS", "ACTIONS").replace(
             "Shape.ONE", "ONE").replace(
+            "Shape.THREE", "THREE").replace(
             "Shape.CRITICS", "CRITICS"
         )
         token = None
@@ -137,6 +138,8 @@ def _parse_output(source: Union[str, Sequence[str]]) -> Tuple[Union[str, Sequenc
             token = "ACTIONS"
         elif "ONE" in source:
             token = "ONE"
+        elif "THREE" in source:
+            token = "THREE"
         elif "CRITICS" in source:
             token = "CRITICS"
         else:
@@ -270,6 +273,7 @@ def get_num_units(token: Union[str, Any]) -> Union[str, Any]:
     """
     num_units = {
         "ONE": "1",
+        "THREE": "3",
         "CRITICS": "self.num_critics",
         "STATES": "self.num_observations",
         "OBSERVATIONS": "self.num_observations",
