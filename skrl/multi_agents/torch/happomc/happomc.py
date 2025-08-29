@@ -399,10 +399,18 @@ class HAPPOMC(MultiAgentMC):
                 if self._time_limit_bootstrap[uid]:
                     rewards[uid] += self._discount_factor[uid] * values * truncated[uid]
 
+                # other actions
+                other_actions = []
+                for other_uid in self.possible_agents:
+                    if other_uid != uid:
+                        other_actions.append(actions[other_uid])
+                other_actions = torch.cat(other_actions, dim=-1)
+                
                 # storage transition in memory
                 self.memories[uid].add_samples(
                     states=states[uid],
                     actions=actions[uid],
+                    other_actions=other_actions,
                     rewards=rewards[uid],
                     next_states=next_states[uid],
                     terminated=terminated[uid],
