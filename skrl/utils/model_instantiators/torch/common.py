@@ -93,6 +93,9 @@ def _parse_input(source: str) -> str:
     source = source.replace("Shape.STATES_ACTIONS", "STATES_ACTIONS").replace(
         "STATES_ACTIONS", "torch.cat([states, taken_actions], dim=1)"
     )
+    source = source.replace("Shape.STATES_OTHER_ACTIONS", "STATES_OTHER_ACTIONS").replace(
+        "STATES_OTHER_ACTIONS", "torch.cat([states, other_actions], dim=1)"
+    )
     source = source.replace("Shape.OBSERVATIONS_ACTIONS", "OBSERVATIONS_ACTIONS").replace(
         "OBSERVATIONS_ACTIONS", "torch.cat([states, taken_actions], dim=1)"
     )
@@ -286,6 +289,7 @@ def get_num_units(token: Union[str, Any]) -> Union[str, Any]:
         "OBSERVATIONS": "self.num_observations",
         "ACTIONS": "self.num_actions",
         "STATES_ACTIONS": "self.num_observations + self.num_actions",
+        "STATES_OTHER_ACTIONS": "self.num_observations + self.other_num_actions",
         "OBSERVATIONS_ACTIONS": "self.num_observations + self.num_actions",
     }
     
