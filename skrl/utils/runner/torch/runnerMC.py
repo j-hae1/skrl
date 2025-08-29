@@ -268,27 +268,18 @@ class RunnerMC:  # Runner for Multi-Critic agents
                         if role == "value":
                             observation_space = state_spaces[agent_id]
                                                         
-                            for gname in critic_group_list:
-                                source = model_class(
-                                    observation_space=observation_space,
-                                    action_space=action_spaces[agent_id],
-                                    device=device,
-                                    **self._process_cfg(models_cfg[role]),
-                                    return_source=True,
-                                )
-                                print("==============================================")
-                                print(f"Model (role): {role} (group: {gname})")
-                                print("==================================================\n")
-                                print(source)
-                                print("--------------------------------------------------")
-                                
-                                models_name = f"{role}_{gname}"
-                                models[agent_id][models_name] = model_class(
-                                    observation_space=observation_space,
-                                    action_space=action_spaces[agent_id],
-                                    device=device,
-                                    **self._process_cfg(models_cfg[role]),
-                                )
+                            print("==============================================")
+                            print(f"Model (role): {role} (num_critics: {num_critics})")
+                            print("==================================================\n")
+                            print(source)
+                            print("--------------------------------------------------")
+                            
+                            models[agent_id][role] = model_class(
+                                observation_space=observation_space,
+                                action_space=action_spaces[agent_id],
+                                device=device,
+                                **self._process_cfg(models_cfg[role]),
+                            )
                             
                         else:  # other roles (e.g., policy) are single models
                             observation_space = observation_spaces[agent_id]
