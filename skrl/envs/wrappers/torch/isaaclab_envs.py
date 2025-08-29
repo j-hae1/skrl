@@ -121,7 +121,10 @@ class IsaacLabMultiAgentWrapper(MultiAgentEnvWrapper):
         }
         return (
             self._observations,
-            {k: v.view(-1, 1) for k, v in rewards.items()},
+            {
+                k: v if (v.dim() == 2 and v.size(1) > 1) else v.view(-1, 1)
+                for k, v in rewards.items()
+            },
             {k: v.view(-1, 1) for k, v in terminated.items()},
             {k: v.view(-1, 1) for k, v in truncated.items()},
             self._info,
