@@ -121,7 +121,7 @@ class HAPPOMC(MultiAgentMC):
             cfg=_cfg,
         )
 
-        # critic groups
+        # set the critic groups
         if 'critic_groups' in self.cfg:
             self.critic_groups = self.cfg['critic_groups']
             self.value_names = [f"value_{group_name}" for group_name in self.critic_groups]
@@ -129,6 +129,28 @@ class HAPPOMC(MultiAgentMC):
 
         else:
             raise ValueError("You must specify 'critic_groups' in the config for HAPPOMC")
+        
+        # set the multi critic weights
+        if "multi_critic_weights" in self.cfg:
+            if self.cfg['multi_critic_weights'] is not None:
+                self.multi_critic_weights = self.cfg['multi_critic_weights']
+                
+                if sorted(self.multi_critic_weights.keys()) != sorted(self.possible_agents):
+                    raise ValueError("All agents must be in the multi critic weights")
+                
+                # check all agents have the each critics (check key with possible agents)
+                for uid in self.possible_agents:
+                    # check critic groups are all in the multi critic weights
+                    weights = self.multi_critic_weights[uid]
+                    if sorted(weights.keys()) != sorted(self.critic_groups):
+                        raise ValueError(f"All critic groups must be in the multi critic weights for agent {uid}")
+                
+            else:
+                self.multi_critic_weights = {uid: {group_name: 1.0 / self.num_critics for group_name in self.critic_groups} for uid in self.possible_agents}
+            
+        else:
+            raise ValueError("You must specify 'multi_critic_weights' in the config for HAPPOMC")
+        
         self.shared_observation_spaces = shared_observation_spaces
 
         # models
@@ -494,6 +516,8 @@ class HAPPOMC(MultiAgentMC):
             policy = self.policies[uid]
             value = self.values[uid]
             memory = self.memories[uid]
+            
+            multi_critic_weights = self.multi_critic_weights[uid]
 
             # compute returns and advantages
             with torch.no_grad(), torch.autocast(device_type=self._device_type, enabled=self._mixed_precision):
@@ -576,9 +600,17 @@ class HAPPOMC(MultiAgentMC):
                         surrogate_clipped = sampled_advantages * torch.clip(
                             ratio, 1.0 - self._ratio_clip[uid], 1.0 + self._ratio_clip[uid]
                         )
+                        
+                        surrogate_min = torch.min(surrogate, surrogate_clipped)
+                        
+                        # multiply each critic's weights from multi_critic_weights to surrogate_min
+                        for i, group_name in enumerate(self.critic_groups):
+                            weight = multi_critic_weights[group_name]
+                            surrogate_min[:, i] *= weight
 
                         # policy_loss = -torch.min(surrogate, surrogate_clipped).mean()
-                        policy_loss = -(sampled_factor * torch.min(surrogate, surrogate_clipped)).mean()
+                        # policy_loss = -(sampled_factor * torch.min(surrogate, surrogate_clipped)).mean()
+                        policy_loss = -(sampled_factor * surrogate_min).mean()
                         # policy_loss = -torch.min(surrogate, surrogate_clipped).mean() * factor
 
                         # compute value loss
