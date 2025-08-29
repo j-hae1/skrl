@@ -127,10 +127,14 @@ def _parse_output(source: Union[str, Sequence[str]]) -> Tuple[Union[str, Sequenc
     modules = []
     if type(source) is str:
         # enum substitutions
-        source = source.replace("Shape.ACTIONS", "ACTIONS").replace("Shape.ONE", "ONE")
+        source = source.replace(
+            "Shape.ACTIONS", "ACTIONS").replace(
+            "Shape.ONE", "ONE").replace(
+            "Shape.CRITICS", "CRITICS"
+        )
         token = "ACTIONS" if "ACTIONS" in source else None
         token = "ONE" if "ONE" in source else token
-        # token = "CRITICS" if "CRITICS" in source else None
+        token = "CRITICS" if "CRITICS" in source else None
 
         if token:
             size = get_num_units(token)
