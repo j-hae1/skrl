@@ -123,6 +123,7 @@ class HAPPOMC(MultiAgentMC):
         
         # compute other action spaces (compute action dimension except its own)
         # use self.action_spaces[key].shape[0]
+        self.other_action_spaces = {}
         total_action_dim = sum(self.action_spaces[uid].shape[0] for uid in self.possible_agents)
         for uid in self.possible_agents:
             self.other_action_spaces[uid] = total_action_dim - self.action_spaces[uid].shape[0]
