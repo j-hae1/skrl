@@ -125,6 +125,7 @@ class HAPPOMC(MultiAgentMC):
         if 'critic_groups' in self.cfg:
             self.critic_groups = self.cfg['critic_groups']
             self.value_names = [f"value_{group_name}" for group_name in self.critic_groups]
+            self.num_critics = len(self.critic_groups)
 
         else:
             raise ValueError("You must specify 'critic_groups' in the config for HAPPOMC")
@@ -132,37 +133,20 @@ class HAPPOMC(MultiAgentMC):
 
         # models
         self.policies = {uid: self.models[uid].get("policy", None) for uid in self.possible_agents}
-        self.values = []
-        for g in self.critic_groups:
-            setattr(self, f"value_{g}", {})  
-        for uid in self.possible_agents:
-            for g in self.critic_groups:
-                key = f"value_{g}"            # e.g., "value_upper"
-                model = self.models[uid].get(key, None)
-                if model is None:
-                    raise KeyError(f"Missing model '{key}' for agent '{uid}'")
-                # >>> 여기서 속성 dict에 uid 매핑으로 저장
-                getattr(self, key)[uid] = model
-
-        self.values = {f"value_{g}": getattr(self, f"value_{g}") for g in self.critic_groups}
+        self.values = {uid: self.models[uid].get("value", None) for uid in self.possible_agents}
 
         for uid in self.possible_agents:
             # checkpoint models
             self.checkpoint_modules[uid]["policy"] = self.policies[uid]
-            # self.checkpoint_modules[uid]["value"] = self.values[uid]
-            for k in self.values.keys():   # k is like "value_upper"
-                self.checkpoint_modules[uid][k] = self.values[k][uid]
+            self.checkpoint_modules[uid]["value"] = self.values[uid]
 
             # broadcast models' parameters in distributed runs
             if config.torch.is_distributed:
                 logger.info(f"Broadcasting models' parameters")
                 if self.policies[uid] is not None:
                     self.policies[uid].broadcast_parameters()
-                    # if self.values[uid] is not None and self.policies[uid] is not self.values[uid]:
-                    #     self.values[uid].broadcast_parameters()
-                for k in self.values.keys():   # k is like "value_upper"
-                    if self.values[k][uid] is not None:
-                        self.values[k][uid].broadcast_parameters()
+                    if self.values[uid] is not None and self.policies[uid] is not self.values[uid]:
+                        self.values[uid].broadcast_parameters()
 
         # configuration
         self._learning_epochs = self._as_dict(self.cfg["learning_epochs"])
@@ -215,20 +199,13 @@ class HAPPOMC(MultiAgentMC):
 
         for uid in self.possible_agents:
             policy = self.policies[uid]
-            # value = self.values[uid]
-            
-            value_models = [self.values[k][uid] for k in self.values.keys() if uid in self.values[k]]
-            
-            if policy is not None or value_models:
-                if not value_models:   # value가 전혀 없을 때
+            value = self.values[uid]
+            if policy is not None and value is not None:
+                if policy is value:
                     optimizer = torch.optim.Adam(policy.parameters(), lr=self._learning_rate[uid])
                 else:
                     optimizer = torch.optim.Adam(
-                        itertools.chain(
-                            policy.parameters() if policy is not None else [],
-                            itertools.chain.from_iterable(vm.parameters() for vm in value_models)
-                        ),
-                        lr=self._learning_rate[uid]
+                        itertools.chain(policy.parameters(), value.parameters()), lr=self._learning_rate[uid]
                     )
                 self.optimizers[uid] = optimizer
                 if self._learning_rate_scheduler[uid] is not None:
@@ -272,13 +249,17 @@ class HAPPOMC(MultiAgentMC):
                     name="shared_states", size=self.shared_observation_spaces[uid], dtype=torch.float32
                 )
                 self.memories[uid].create_tensor(name="actions", size=self.action_spaces[uid], dtype=torch.float32)
-                self.memories[uid].create_tensor(name="rewards", size=1, dtype=torch.float32)
+                # self.memories[uid].create_tensor(name="rewards", size=1, dtype=torch.float32)
+                self.memories[uid].create_tensor(name="rewards", size=self.num_critics, dtype=torch.float32)
                 self.memories[uid].create_tensor(name="terminated", size=1, dtype=torch.bool)
                 self.memories[uid].create_tensor(name="truncated", size=1, dtype=torch.bool)
                 self.memories[uid].create_tensor(name="log_prob", size=1, dtype=torch.float32)
-                self.memories[uid].create_tensor(name="values", size=1, dtype=torch.float32)
-                self.memories[uid].create_tensor(name="returns", size=1, dtype=torch.float32)
-                self.memories[uid].create_tensor(name="advantages", size=1, dtype=torch.float32)
+                # self.memories[uid].create_tensor(name="values", size=1, dtype=torch.float32)
+                # self.memories[uid].create_tensor(name="returns", size=1, dtype=torch.float32)
+                # self.memories[uid].create_tensor(name="advantages", size=1, dtype=torch.float32)
+                self.memories[uid].create_tensor(name="values", size=self.num_critics, dtype=torch.float32)
+                self.memories[uid].create_tensor(name="returns", size=self.num_critics, dtype=torch.float32)
+                self.memories[uid].create_tensor(name="advantages", size=self.num_critics, dtype=torch.float32)
                 self.memories[uid].create_tensor(name="factor", size=1, dtype=torch.float32)
 
                 # tensors sampled during training
