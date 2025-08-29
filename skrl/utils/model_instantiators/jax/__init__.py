@@ -17,3 +17,4 @@ class Shape(Enum):
     OBSERVATIONS = 0
     ACTIONS = -1
     STATES_ACTIONS = -2
+    CRITICS = 1

@@ -252,6 +252,7 @@ def get_num_units(token: Union[str, Any]) -> Union[str, Any]:
     """
     num_units = {
         "ONE": "1",
+        "CRITICS": "self.num_critics",
         "STATES": "self.num_observations",
         "OBSERVATIONS": "self.num_observations",
         "ACTIONS": "self.num_actions",
