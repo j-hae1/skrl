@@ -93,9 +93,6 @@ def _parse_input(source: str) -> str:
     source = source.replace("Shape.STATES_ACTIONS", "STATES_ACTIONS").replace(
         "STATES_ACTIONS", "torch.cat([states, taken_actions], dim=1)"
     )
-    source = source.replace("Shape.STATES_OTHER_ACTIONS", "STATES_OTHER_ACTIONS").replace(
-        "STATES_OTHER_ACTIONS", "torch.cat([states, taken_actions], dim=1)"
-    )
     source = source.replace("Shape.OBSERVATIONS_ACTIONS", "OBSERVATIONS_ACTIONS").replace(
         "OBSERVATIONS_ACTIONS", "torch.cat([states, taken_actions], dim=1)"
     )
