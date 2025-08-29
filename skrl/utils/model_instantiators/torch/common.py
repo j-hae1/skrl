@@ -132,9 +132,15 @@ def _parse_output(source: Union[str, Sequence[str]]) -> Tuple[Union[str, Sequenc
             "Shape.ONE", "ONE").replace(
             "Shape.CRITICS", "CRITICS"
         )
-        token = "ACTIONS" if "ACTIONS" in source else None
-        token = "ONE" if "ONE" in source else token
-        token = "CRITICS" if "CRITICS" in source else None
+        token = None
+        if "ACTIONS" in source:
+            token = "ACTIONS"
+        elif "ONE" in source:
+            token = "ONE"
+        elif "CRITICS" in source:
+            token = "CRITICS"
+        else:
+            token = "ACTIONS"
 
         if token:
             size = get_num_units(token)
