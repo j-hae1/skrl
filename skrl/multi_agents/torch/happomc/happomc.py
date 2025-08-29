@@ -460,8 +460,10 @@ class HAPPOMC(MultiAgentMC):
             # returns computation
             returns = advantages + values
             # normalize advantages
-            advantages = (advantages - advantages.mean()) / (advantages.std() + 1e-8)
-
+            # advantages = (advantages - advantages.mean()) / (advantages.std() + 1e-8)
+            # normalize advantages for each critic
+            advantages = (advantages - advantages.mean(dim=(0, 1), keepdim=True)) / \
+             (advantages.std(dim=(0, 1), keepdim=True) + 1e-8)
             return returns, advantages
 
         # HAPPO: random permutation of agents
