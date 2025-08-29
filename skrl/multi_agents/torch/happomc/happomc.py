@@ -120,6 +120,12 @@ class HAPPOMC(MultiAgentMC):
             device=device,
             cfg=_cfg,
         )
+        
+        # compute other action spaces (compute action dimension except its own)
+        # use self.action_spaces[key].shape[0]
+        total_action_dim = sum(self.action_spaces[uid].shape[0] for uid in self.possible_agents)
+        for uid in self.possible_agents:
+            self.other_action_spaces[uid] = total_action_dim - self.action_spaces[uid].shape[0]
 
         # set the critic groups
         if 'critic_groups' in self.cfg:
@@ -271,6 +277,7 @@ class HAPPOMC(MultiAgentMC):
                     name="shared_states", size=self.shared_observation_spaces[uid], dtype=torch.float32
                 )
                 self.memories[uid].create_tensor(name="actions", size=self.action_spaces[uid], dtype=torch.float32)
+                self.memories[uid].create_tensor(name="other_actions", size=self.other_action_spaces[uid], dtype=torch.float32)
                 # self.memories[uid].create_tensor(name="rewards", size=1, dtype=torch.float32)
                 self.memories[uid].create_tensor(name="rewards", size=self.num_critics, dtype=torch.float32)
                 self.memories[uid].create_tensor(name="terminated", size=1, dtype=torch.bool)
@@ -289,6 +296,7 @@ class HAPPOMC(MultiAgentMC):
                     "states",
                     "shared_states",
                     "actions",
+                    "other_actions",
                     "log_prob",
                     "values",
                     "returns",
@@ -560,6 +568,7 @@ class HAPPOMC(MultiAgentMC):
                     sampled_states,
                     sampled_shared_states,
                     sampled_actions,
+                    sampled_other_actions,
                     sampled_log_prob,
                     sampled_values,
                     sampled_returns,
