@@ -130,6 +130,8 @@ def _parse_output(source: Union[str, Sequence[str]]) -> Tuple[Union[str, Sequenc
         source = source.replace("Shape.ACTIONS", "ACTIONS").replace("Shape.ONE", "ONE")
         token = "ACTIONS" if "ACTIONS" in source else None
         token = "ONE" if "ONE" in source else token
+        token = "CRITICS" if "CRITICS" in source else None
+
         if token:
             size = get_num_units(token)
             modules = [f"nn.LazyLinear(out_features={get_num_units(token)})"]
